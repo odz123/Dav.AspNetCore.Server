@@ -147,7 +147,7 @@ public sealed class InMemoryLockManager : ILockManager
         
         var allActiveLocks = new List<ResourceLock>();
         var pathParts = uri.LocalPath.Split('/');
-        if (uri.AbsoluteUri.Equals("/"))
+        if (uri.LocalPath == "/")
             pathParts = new[] { "" };
             
         var currentPath = string.Empty;

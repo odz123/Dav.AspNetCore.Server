@@ -29,8 +29,8 @@ public class LocalFileStore : FileStore
     public override ValueTask DeleteDirectoryAsync(Uri uri, CancellationToken cancellationToken = default)
     {
         var path = Path.Combine(options.RootPath, uri.LocalPath.TrimStart('/'));
-        System.IO.Directory.Delete(path);
-        
+        System.IO.Directory.Delete(path, recursive: true);
+
         return ValueTask.CompletedTask;
     }
 
