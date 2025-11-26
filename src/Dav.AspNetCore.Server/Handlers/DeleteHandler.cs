@@ -13,7 +13,7 @@ internal class DeleteHandler : RequestHandler
     {
         if (Item == null)
         {
-            Context.SetResult(DavStatusCode.NoContent);
+            Context.SetResult(DavStatusCode.NotFound);
             return;
         }
 

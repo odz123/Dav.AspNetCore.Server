@@ -23,7 +23,11 @@ internal class LockHandler : RequestHandler
 
         var timeout = WebDavHeaders.Timeouts
             .OrderByDescending(x => x.TotalSeconds)
-            .First(x => x <= (Options.MaxLockTimeout ?? TimeSpan.MaxValue));
+            .FirstOrDefault(x => x <= (Options.MaxLockTimeout ?? TimeSpan.MaxValue));
+
+        // If no valid timeout found (all requested timeouts exceed MaxLockTimeout), use MaxLockTimeout
+        if (timeout == default && Options.MaxLockTimeout != null)
+            timeout = Options.MaxLockTimeout.Value;
 
         if (WebDavHeaders.Timeouts.Any(x => x == TimeSpan.Zero) && Options.MaxLockTimeout == null)
             timeout = TimeSpan.Zero;

@@ -23,17 +23,17 @@ internal class GetHandler : RequestHandler
         var contentType = await GetNonExpensivePropertyAsync(Item, XmlNames.GetContentType, cancellationToken);
         if (!string.IsNullOrWhiteSpace(contentType))
             Context.Response.Headers["Content-Type"] = contentType;
-        
+
         var contentLanguage = await GetNonExpensivePropertyAsync(Item, XmlNames.GetContentLanguage, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(contentType))
+        if (!string.IsNullOrWhiteSpace(contentLanguage))
             Context.Response.Headers["Content-Language"] = contentLanguage;
-        
+
         var lastModified = await GetNonExpensivePropertyAsync(Item, XmlNames.GetLastModified, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(contentType))
+        if (!string.IsNullOrWhiteSpace(lastModified))
             Context.Response.Headers["Last-Modified"] = lastModified;
-        
+
         var etag = await GetNonExpensivePropertyAsync(Item, XmlNames.GetEtag, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(contentType))
+        if (!string.IsNullOrWhiteSpace(etag))
             Context.Response.Headers["ETag"] = etag;
         
         var contentLength = await GetNonExpensivePropertyAsync(Item, XmlNames.GetContentLength, cancellationToken);
@@ -125,7 +125,7 @@ internal class GetHandler : RequestHandler
             if (range.From != null && range.To != null)
             {
                 stream.Seek(range.From.Value, SeekOrigin.Begin);
-                bytesToRead = range.To.Value - range.From.Value;
+                bytesToRead = range.To.Value - range.From.Value + 1;
             }
             
             context.SetResult(DavStatusCode.PartialContent);

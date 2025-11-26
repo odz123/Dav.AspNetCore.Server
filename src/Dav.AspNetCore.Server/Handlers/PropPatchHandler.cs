@@ -57,8 +57,8 @@ internal class PropPatchHandler : RequestHandler
                     element.Name,
                     propertyValue,
                     cancellationToken);
-                
-                results.Add(element.Name, result);
+
+                results[element.Name] = result;
             }
         }
         
@@ -74,8 +74,8 @@ internal class PropPatchHandler : RequestHandler
                     element.Name,
                     null,
                     cancellationToken);
-                
-                results.Add(element.Name, result);
+
+                results[element.Name] = result;
             }
         }
 

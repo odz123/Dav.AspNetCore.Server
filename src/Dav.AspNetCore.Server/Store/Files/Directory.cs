@@ -225,8 +225,8 @@ public class Directory : IStoreCollection
         {
             return DavStatusCode.InternalServerError;
         }
-        
-        return DavStatusCode.NoContent;
+
+        return DavStatusCode.NotFound;
     }
 
     internal static void RegisterProperties()

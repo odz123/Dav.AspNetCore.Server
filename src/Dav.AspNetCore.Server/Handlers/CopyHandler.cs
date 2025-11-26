@@ -35,7 +35,7 @@ internal class CopyHandler : RequestHandler
             return;
         }
 
-        var depth = WebDavHeaders.Depth ?? Depth.None;
+        var depth = WebDavHeaders.Depth ?? Depth.Infinity;
 
         var destination = WebDavHeaders.Destination;
         if (!string.IsNullOrWhiteSpace(Context.Request.PathBase))
@@ -77,7 +77,7 @@ internal class CopyHandler : RequestHandler
         {
             Context.SetResult(destinationItem != null
                 ? DavStatusCode.NoContent
-                : DavStatusCode.Ok);
+                : DavStatusCode.Created);
             return;
         }
         
