@@ -78,11 +78,11 @@ internal class LockHandler : RequestHandler
                 activeLock.Id,
                 timeout,
                 cancellationToken);
-        } 
+        }
         else if (Context.Request.ContentType != null &&
                  (Context.Request.ContentType.Contains("application/xml") ||
                   Context.Request.ContentType.Contains("text/xml")) &&
-                 Context.Request.ContentLength > 0)
+                 (Context.Request.ContentLength is null or > 0))
         {
             var requestDocument = await Context.ReadDocumentAsync(cancellationToken);
             if (requestDocument == null)
