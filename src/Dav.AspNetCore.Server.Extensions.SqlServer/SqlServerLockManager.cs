@@ -156,7 +156,7 @@ public class SqlServerLockManager : SqlLockManager
     {
         var command = connection.CreateCommand();
         command.CommandText = $"DELETE FROM {GetTableId()} WHERE (Issued + Timeout < @TotalSeconds AND Timeout <> 0)";
-        command.Parameters.Add(new SqlParameter("@TotalSeconds", (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds));
+        command.Parameters.Add(new SqlParameter("@TotalSeconds", totalSeconds));
 
         return command;
     }

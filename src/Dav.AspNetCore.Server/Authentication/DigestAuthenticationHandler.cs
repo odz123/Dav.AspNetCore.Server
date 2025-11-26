@@ -101,7 +101,7 @@ internal class DigestAuthenticationHandler : AuthenticationHandler<DigestAuthent
             return AuthenticateResult.NoResult();
         
         var identity = new Identity(
-            BasicAuthenticationDefaults.AuthenticationScheme,
+            DigestAuthenticationDefaults.AuthenticationScheme,
             true,
             userName);
 
