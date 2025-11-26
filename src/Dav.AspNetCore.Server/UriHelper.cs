@@ -20,11 +20,16 @@ internal static class UriHelper
 
     public static Uri Combine(Uri uri, string path)
     {
-        var localPath = uri.LocalPath;
-        if (!localPath.EndsWith("/"))
-            localPath += "/";
+        // Use AbsolutePath (encoded) to preserve proper encoding
+        var encodedBasePath = uri.AbsolutePath;
+        if (!encodedBasePath.EndsWith("/"))
+            encodedBasePath += "/";
 
-        return new Uri($"{localPath}{path.TrimStart('/')}");
+        // The path parameter is typically a decoded item name, so we need to encode it
+        // to prevent special characters like # from being interpreted as URI delimiters
+        var encodedPath = Uri.EscapeDataString(path.TrimStart('/'));
+
+        return new Uri($"{encodedBasePath}{encodedPath}");
     }
 
     public static Uri GetRelativeUri(this Uri relativeTo, Uri uri)

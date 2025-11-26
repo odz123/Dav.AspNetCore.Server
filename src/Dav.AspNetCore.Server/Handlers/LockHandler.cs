@@ -167,7 +167,7 @@ internal class LockHandler : RequestHandler
             : $"Second-{resourceLock.Timeout.TotalSeconds:F0}");
 
         var lockToken = new XElement(XmlNames.LockToken, new XElement(XmlNames.Href, resourceLock.Id.AbsoluteUri));
-        var lockRoot = new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{Context.Request.PathBase}{resourceLock.Uri.AbsolutePath}"));
+        var lockRoot = new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{Context.Request.PathBase.ToUriComponent()}{resourceLock.Uri.AbsolutePath}"));
         var activeLock = new XElement(XmlNames.ActiveLock, lockType, lockScope, depth, owner, timeout, lockToken, lockRoot);
         var lockDiscovery = new XElement(XmlNames.LockDiscovery, activeLock);
         var prop = new XElement(XmlNames.Property, lockDiscovery);

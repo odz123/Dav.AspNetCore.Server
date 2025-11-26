@@ -56,8 +56,11 @@ public class DestinationHeaderValue
         }
 
         // Handle relative paths (e.g., "/path" or "path")
+        // Input may be URL-encoded, so we need to decode it for PathString
+        // which expects a decoded path value
         var relativePath = input.StartsWith("/") ? input : $"/{input}";
-        var relativePathString = new PathString(relativePath);
+        var decodedPath = Uri.UnescapeDataString(relativePath);
+        var relativePathString = new PathString(decodedPath);
         parsedValue = new DestinationHeaderValue(relativePathString.ToUri());
         return true;
     }
