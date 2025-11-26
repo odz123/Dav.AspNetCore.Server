@@ -75,7 +75,7 @@ public class XmlFilePropertyStore : IPropertyStore
             if (fileInfo.Directory?.Exists == false)
                 fileInfo.Directory.Create();
             
-            await using var fileStream = File.OpenWrite(xmlFilePath);
+            await using var fileStream = File.Create(xmlFilePath);
             await document.SaveAsync(fileStream, SaveOptions.None, cancellationToken);
         }
     }
@@ -94,8 +94,8 @@ public class XmlFilePropertyStore : IPropertyStore
         if (File.Exists(xmlFilePath))
             File.Delete(xmlFilePath);
 
-        propertyCache.Remove(item);
-        
+        propertyCache.TryRemove(item, out _);
+
         return ValueTask.CompletedTask;
     }
 
@@ -125,7 +125,12 @@ public class XmlFilePropertyStore : IPropertyStore
 
         if (propertyCache.TryGetValue(source, out var propertyMap))
         {
-            propertyCache[destination] = propertyMap.ToDictionary(x => x.Key, x => x.Value);
+            var newCache = new ConcurrentDictionary<XName, PropertyData>();
+            foreach (var kvp in propertyMap)
+            {
+                newCache[kvp.Key] = kvp.Value;
+            }
+            propertyCache[destination] = newCache;
         }
 
         return ValueTask.CompletedTask;
@@ -182,7 +187,7 @@ public class XmlFilePropertyStore : IPropertyStore
         ArgumentNullException.ThrowIfNull(item, nameof(item));
         
         if (propertyCache.TryGetValue(item, out var propertyMap))
-            return propertyMap.Values;
+            return propertyMap.Values.ToArray();
         
         var xmlFilePath = GetSafePath(item.Uri, ".xml");
         if (!File.Exists(xmlFilePath))
@@ -198,10 +203,12 @@ public class XmlFilePropertyStore : IPropertyStore
         {
             var document = await XDocument.LoadAsync(fileStream, LoadOptions.None, cancellationToken);
             var propertyStore = document.Element(PropertyStore);
-            var properties = propertyStore?.Elements(Property).Select(x => x.Elements().First());
+            var properties = propertyStore?.Elements(Property)
+                .Select(x => x.Elements().FirstOrDefault())
+                .OfType<XElement>();
             if (properties == null)
             {
-                propertyCache[item] = new Dictionary<XName, PropertyData>();
+                propertyCache[item] = new ConcurrentDictionary<XName, PropertyData>();
                 return propertyDataList;
             }
 

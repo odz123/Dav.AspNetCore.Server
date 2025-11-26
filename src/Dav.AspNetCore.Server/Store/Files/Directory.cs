@@ -62,14 +62,30 @@ public class Directory : IStoreCollection
     public async Task<ItemResult> CopyAsync(
         IStoreCollection destination,
         string name,
-        bool overwrite, 
+        bool overwrite,
         CancellationToken cancellationToken = default)
     {
+        var existingItem = await destination.GetItemAsync(name, cancellationToken);
+        if (existingItem != null && !overwrite)
+            return ItemResult.Fail(DavStatusCode.PreconditionFailed);
+
+        // If item exists and overwrite is true, delete it first
+        if (existingItem != null)
+        {
+            var deleteStatus = await destination.DeleteItemAsync(name, cancellationToken);
+            if (deleteStatus != DavStatusCode.NoContent)
+                return ItemResult.Fail(deleteStatus);
+        }
+
         var result = await destination.CreateCollectionAsync(name, cancellationToken);
-        if (result.Collection != null)
-            store.ItemCache[result.Collection.Uri] = result.Collection;
-        
-        return new ItemResult(result.StatusCode, result.Collection);
+        if (result.Collection == null)
+            return ItemResult.Fail(result.StatusCode);
+
+        store.ItemCache[result.Collection.Uri] = result.Collection;
+
+        return existingItem != null
+            ? ItemResult.NoContent(result.Collection)
+            : new ItemResult(result.StatusCode, result.Collection);
     }
 
     /// <summary>
@@ -203,16 +219,16 @@ public class Directory : IStoreCollection
             if (await store.DirectoryExistsAsync(uri, cancellationToken))
             {
                 await store.DeleteDirectoryAsync(uri, cancellationToken);
-                store.ItemCache.Remove(uri);
-                
+                store.ItemCache.TryRemove(uri, out _);
+
                 return DavStatusCode.NoContent;
             }
 
             if (await store.FileExistsAsync(uri, cancellationToken))
             {
                 await store.DeleteFileAsync(uri, cancellationToken);
-                store.ItemCache.Remove(uri);
-                
+                store.ItemCache.TryRemove(uri, out _);
+
                 return DavStatusCode.NoContent;
             }
         }

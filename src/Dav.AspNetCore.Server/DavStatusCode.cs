@@ -43,7 +43,10 @@ public enum DavStatusCode
     
     [DavStatusCode("Precondition Failed")]
     PreconditionFailed = StatusCodes.Status412PreconditionFailed,
-    
+
+    [DavStatusCode("Requested Range Not Satisfiable")]
+    RequestedRangeNotSatisfiable = StatusCodes.Status416RangeNotSatisfiable,
+
     [DavStatusCode("Locked")]
     Locked = StatusCodes.Status423Locked,
     
