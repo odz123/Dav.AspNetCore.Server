@@ -9,8 +9,6 @@ public class Directory : IStoreCollection
 {
     private readonly FileStore store;
     private readonly DirectoryProperties properties;
-
-    private static readonly XElement Collection = new(XmlNames.Collection);
     
     /// <summary>
     /// Initializes a new <see cref="Directory"/> class.
@@ -271,7 +269,8 @@ public class Directory : IStoreCollection
             XmlNames.ResourceType,
             read: (context, _) =>
             {
-                context.SetResult(Collection); 
+                // Return a new XElement instance each time to prevent mutation issues
+                context.SetResult(new XElement(XmlNames.Collection));
                 return ValueTask.CompletedTask;
             },
             metadata: new PropertyMetadata(Computed: true));

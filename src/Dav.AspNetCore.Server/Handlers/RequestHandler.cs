@@ -257,7 +257,12 @@ internal abstract class RequestHandler : IRequestHandler
                         else
                         {
                             items[resourceUri] = await collection.GetItemAsync(itemName, cancellationToken);
-                        }   
+                        }
+                    }
+                    else
+                    {
+                        // Parent collection doesn't exist, so item doesn't exist
+                        items[resourceUri] = null;
                     }
                 }
 
@@ -388,7 +393,9 @@ internal abstract class RequestHandler : IRequestHandler
             if (Item != null)
             {
                 var modifiedResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetLastModified, cancellationToken);
-                if (modifiedResult.IsSuccess && DateTimeOffset.Parse(modifiedResult.Value!.ToString()!) > requestHeaders.IfUnmodifiedSince)
+                if (modifiedResult.IsSuccess &&
+                    DateTimeOffset.TryParse(modifiedResult.Value?.ToString(), out var lastModified) &&
+                    lastModified > requestHeaders.IfUnmodifiedSince)
                 {
                     Context.SetResult(DavStatusCode.PreconditionFailed);
                     return false;
@@ -403,7 +410,9 @@ internal abstract class RequestHandler : IRequestHandler
             if (Item != null)
             {
                 var modifiedResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetLastModified, cancellationToken);
-                if (modifiedResult.IsSuccess && DateTimeOffset.Parse(modifiedResult.Value!.ToString()!) <= requestHeaders.IfModifiedSince)
+                if (modifiedResult.IsSuccess &&
+                    DateTimeOffset.TryParse(modifiedResult.Value?.ToString(), out var lastModified) &&
+                    lastModified <= requestHeaders.IfModifiedSince)
                 {
                     Context.SetResult(DavStatusCode.NotModified);
                     return false;

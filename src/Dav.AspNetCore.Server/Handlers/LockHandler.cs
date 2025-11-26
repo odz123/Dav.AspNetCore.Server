@@ -14,23 +14,27 @@ internal class LockHandler : RequestHandler
     protected override async Task HandleRequestAsync(CancellationToken cancellationToken = default)
     {
         var requestUri = Context.Request.Path.ToUri();
-        
+
+        // Timeout header is optional per RFC 4918 - use default if not provided
+        TimeSpan timeout;
         if (WebDavHeaders.Timeouts.Count == 0)
         {
-            Context.SetResult(DavStatusCode.BadRequest);
-            return;
+            // No timeout specified - use MaxLockTimeout if configured, otherwise infinite
+            timeout = Options.MaxLockTimeout ?? TimeSpan.Zero;
         }
+        else
+        {
+            timeout = WebDavHeaders.Timeouts
+                .OrderByDescending(x => x.TotalSeconds)
+                .FirstOrDefault(x => x <= (Options.MaxLockTimeout ?? TimeSpan.MaxValue));
 
-        var timeout = WebDavHeaders.Timeouts
-            .OrderByDescending(x => x.TotalSeconds)
-            .FirstOrDefault(x => x <= (Options.MaxLockTimeout ?? TimeSpan.MaxValue));
+            // If no valid timeout found (all requested timeouts exceed MaxLockTimeout), use MaxLockTimeout
+            if (timeout == default && Options.MaxLockTimeout != null)
+                timeout = Options.MaxLockTimeout.Value;
 
-        // If no valid timeout found (all requested timeouts exceed MaxLockTimeout), use MaxLockTimeout
-        if (timeout == default && Options.MaxLockTimeout != null)
-            timeout = Options.MaxLockTimeout.Value;
-
-        if (WebDavHeaders.Timeouts.Any(x => x == TimeSpan.Zero) && Options.MaxLockTimeout == null)
-            timeout = TimeSpan.Zero;
+            if (WebDavHeaders.Timeouts.Any(x => x == TimeSpan.Zero) && Options.MaxLockTimeout == null)
+                timeout = TimeSpan.Zero;
+        }
 
         var depth = WebDavHeaders.Depth ?? Depth.Infinity;
         if (depth == Depth.One)

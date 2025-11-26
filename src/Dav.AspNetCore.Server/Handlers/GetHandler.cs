@@ -64,7 +64,7 @@ internal class GetHandler : RequestHandler
         {
             if (requestHeaders.IfRange.EntityTag != null &&
                 !string.IsNullOrWhiteSpace(etag) &&
-                requestHeaders.IfRange.EntityTag.Tag != etag)
+                requestHeaders.IfRange.EntityTag.Tag != $"\"{etag}\"")
             {
                 disableRanges = true;
             }
@@ -129,16 +129,22 @@ internal class GetHandler : RequestHandler
             }
             
             context.SetResult(DavStatusCode.PartialContent);
-            
+
+            var rangeStart = stream.Position;
+            var rangeEnd = rangeStart + bytesToRead - 1;
+
             context.Response.ContentLength = bytesToRead;
-            context.Response.Headers["Content-Range"] = $"bytes {range}/{stream.Length}";
+            context.Response.Headers["Content-Range"] = $"bytes {rangeStart}-{rangeEnd}/{stream.Length}";
 
             while (bytesToRead > 0)
             {
                 var buffer = new byte[Math.Min(bytesToRead, 1024 * 64)];
                 var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                if (bytesRead == 0)
+                    break; // End of stream reached unexpectedly
+
                 await context.Response.Body.WriteAsync(buffer, 0, bytesRead, cancellationToken);
-                
+
                 bytesToRead -= bytesRead;
             }
 

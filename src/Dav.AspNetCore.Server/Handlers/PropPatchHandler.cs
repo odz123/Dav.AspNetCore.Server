@@ -33,13 +33,15 @@ internal class PropPatchHandler : RequestHandler
         }
 
         var results = new Dictionary<XName, DavStatusCode>();
-        
-        var sets = propertyUpdate
-            .Element(XmlNames.Set)?.Element(XmlNames.Property)?.Elements();
-        
-        if (sets != null)
+
+        // Process all <set> elements (there can be multiple per RFC 4918)
+        foreach (var setElement in propertyUpdate.Elements(XmlNames.Set))
         {
-            foreach (var element in sets)
+            var props = setElement.Element(XmlNames.Property)?.Elements();
+            if (props == null)
+                continue;
+
+            foreach (var element in props)
             {
                 object? propertyValue = null;
                 if (element.FirstNode != null)
@@ -51,7 +53,7 @@ internal class PropPatchHandler : RequestHandler
                         _ => propertyValue
                     };
                 }
-                
+
                 var result = await PropertyManager.SetPropertyAsync(
                     Item,
                     element.Name,
@@ -61,13 +63,15 @@ internal class PropPatchHandler : RequestHandler
                 results[element.Name] = result;
             }
         }
-        
-        var removes = propertyUpdate
-            .Element(XmlNames.Remove)?.Element(XmlNames.Property)?.Elements();
 
-        if (removes != null)
+        // Process all <remove> elements (there can be multiple per RFC 4918)
+        foreach (var removeElement in propertyUpdate.Elements(XmlNames.Remove))
         {
-            foreach (var element in removes)
+            var props = removeElement.Element(XmlNames.Property)?.Elements();
+            if (props == null)
+                continue;
+
+            foreach (var element in props)
             {
                 var result = await PropertyManager.SetPropertyAsync(
                     Item,
