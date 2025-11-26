@@ -16,11 +16,10 @@ internal class DigestAuthenticationHandler : AuthenticationHandler<DigestAuthent
     private static readonly TimeSpan OpaqueExpiration = TimeSpan.FromHours(1);
 
     public DigestAuthenticationHandler(
-        IOptionsMonitor<DigestAuthenticationSchemeOptions> options, 
-        ILoggerFactory logger, 
-        UrlEncoder encoder, 
-        ISystemClock clock) 
-        : base(options, logger, encoder, clock)
+        IOptionsMonitor<DigestAuthenticationSchemeOptions> options,
+        ILoggerFactory logger,
+        UrlEncoder encoder)
+        : base(options, logger, encoder)
     {
     }
 
