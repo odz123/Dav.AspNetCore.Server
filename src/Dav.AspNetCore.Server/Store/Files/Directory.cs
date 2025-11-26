@@ -217,16 +217,16 @@ public class Directory : IStoreCollection
             if (await store.DirectoryExistsAsync(uri, cancellationToken))
             {
                 await store.DeleteDirectoryAsync(uri, cancellationToken);
-                store.ItemCache.Remove(uri);
-                
+                store.ItemCache.TryRemove(uri, out _);
+
                 return DavStatusCode.NoContent;
             }
 
             if (await store.FileExistsAsync(uri, cancellationToken))
             {
                 await store.DeleteFileAsync(uri, cancellationToken);
-                store.ItemCache.Remove(uri);
-                
+                store.ItemCache.TryRemove(uri, out _);
+
                 return DavStatusCode.NoContent;
             }
         }

@@ -203,7 +203,9 @@ public class XmlFilePropertyStore : IPropertyStore
         {
             var document = await XDocument.LoadAsync(fileStream, LoadOptions.None, cancellationToken);
             var propertyStore = document.Element(PropertyStore);
-            var properties = propertyStore?.Elements(Property).Select(x => x.Elements().First());
+            var properties = propertyStore?.Elements(Property)
+                .Select(x => x.Elements().FirstOrDefault())
+                .Where(x => x != null);
             if (properties == null)
             {
                 propertyCache[item] = new ConcurrentDictionary<XName, PropertyData>();
