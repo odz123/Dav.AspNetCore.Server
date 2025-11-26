@@ -8,8 +8,9 @@ public class XmlFilePropertyStore : IPropertyStore
     private const string Namespace = "https://github.com/ThuCommix/Dav.AspNetCore.Server";
     private static readonly XName PropertyStore = XName.Get("PropertyStore", Namespace);
     private static readonly XName Property = XName.Get("Property", Namespace);
-    
+
     private readonly XmlFilePropertyStoreOptions options;
+    private readonly string normalizedRootPath;
     private readonly Dictionary<IStoreItem, Dictionary<XName, PropertyData>> propertyCache = new();
     private readonly Dictionary<IStoreItem, bool> writeLookup = new();
 
@@ -21,6 +22,30 @@ public class XmlFilePropertyStore : IPropertyStore
     {
         ArgumentNullException.ThrowIfNull(options, nameof(options));
         this.options = options;
+        // Normalize the root path once at construction and ensure it ends with separator
+        normalizedRootPath = Path.GetFullPath(options.RootPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+    }
+
+    /// <summary>
+    /// Safely combines root path with URI path and validates against path traversal.
+    /// </summary>
+    /// <param name="uri">The URI to combine with root path.</param>
+    /// <param name="suffix">Optional suffix to append (e.g., ".xml").</param>
+    /// <returns>The validated full path.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when path traversal is detected.</exception>
+    private string GetSafePath(Uri uri, string suffix = "")
+    {
+        var combinedPath = Path.Combine(options.RootPath, uri.LocalPath.TrimStart('/') + suffix);
+        var fullPath = Path.GetFullPath(combinedPath);
+
+        // Ensure the resolved path is within the root directory
+        if (!fullPath.StartsWith(normalizedRootPath, StringComparison.OrdinalIgnoreCase) &&
+            !fullPath.Equals(normalizedRootPath.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Access denied: Path traversal detected.");
+        }
+
+        return fullPath;
     }
 
     /// <summary>
@@ -44,7 +69,7 @@ public class XmlFilePropertyStore : IPropertyStore
                 propertyStore.Add(new XElement(Property, new XElement(propertyData.Value.Name, propertyData.Value.CurrentValue)));
             }
             
-            var xmlFilePath = Path.Combine(options.RootPath, entry.Key.Uri.LocalPath.TrimStart('/') + ".xml");
+            var xmlFilePath = GetSafePath(entry.Key.Uri, ".xml");
             var fileInfo = new FileInfo(xmlFilePath);
             if (fileInfo.Directory?.Exists == false)
                 fileInfo.Directory.Create();
@@ -64,7 +89,7 @@ public class XmlFilePropertyStore : IPropertyStore
         IStoreItem item, 
         CancellationToken cancellationToken = default)
     {
-        var xmlFilePath = Path.Combine(options.RootPath, item.Uri.LocalPath.TrimStart('/') + ".xml");
+        var xmlFilePath = GetSafePath(item.Uri, ".xml");
         if (File.Exists(xmlFilePath))
             File.Delete(xmlFilePath);
 
@@ -85,8 +110,8 @@ public class XmlFilePropertyStore : IPropertyStore
         IStoreItem destination, 
         CancellationToken cancellationToken = default)
     {
-        var sourceXmlFilePath = Path.Combine(options.RootPath, source.Uri.LocalPath.TrimStart('/') + ".xml");
-        var destinationXmlFilePath = Path.Combine(options.RootPath, destination.Uri.LocalPath.TrimStart('/') + ".xml");
+        var sourceXmlFilePath = GetSafePath(source.Uri, ".xml");
+        var destinationXmlFilePath = GetSafePath(destination.Uri, ".xml");
         
         if (File.Exists(sourceXmlFilePath))
         {
@@ -158,7 +183,7 @@ public class XmlFilePropertyStore : IPropertyStore
         if (propertyCache.TryGetValue(item, out var propertyMap))
             return propertyMap.Values;
         
-        var xmlFilePath = Path.Combine(options.RootPath, item.Uri.LocalPath.TrimStart('/') + ".xml");
+        var xmlFilePath = GetSafePath(item.Uri, ".xml");
         if (!File.Exists(xmlFilePath))
         {
             propertyCache[item] = new Dictionary<XName, PropertyData>();

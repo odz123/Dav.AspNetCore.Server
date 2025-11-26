@@ -153,7 +153,7 @@ public class Property
                     activelock.Add(new XElement(XmlNames.Owner, new XElement(XmlNames.Href, resourceLock.Owner)));
                     activelock.Add(new XElement(XmlNames.Timeout, timeoutValue));
                     activelock.Add(new XElement(XmlNames.LockToken, new XElement(XmlNames.Href, $"urn:uuid:{resourceLock.Id:D}")));
-                    activelock.Add(new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{httpContextAccessor?.HttpContext?.Request.PathBase}{resourceLock.Uri.AbsolutePath}")));
+                    activelock.Add(new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{httpContextAccessor?.HttpContext?.Request.PathBase.ToUriComponent()}{resourceLock.Uri.AbsolutePath}")));
 
                     activeLocks.Add(activelock);
                 }

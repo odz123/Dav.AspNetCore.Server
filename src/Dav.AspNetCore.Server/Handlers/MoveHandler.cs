@@ -29,10 +29,23 @@ internal class MoveHandler : RequestHandler
         }
 
         var destination = WebDavHeaders.Destination;
-        if (!string.IsNullOrWhiteSpace(Context.Request.PathBase))
+        if (Context.Request.PathBase.HasValue)
         {
-            if (Context.Request.PathBase.HasValue)
-                destination = new Uri(destination.LocalPath.Substring(Context.Request.PathBase.Value.Length));
+            var pathBase = Context.Request.PathBase.Value;
+            var destinationPath = destination.LocalPath;
+
+            // Only strip PathBase if the destination actually starts with it
+            if (destinationPath.StartsWith(pathBase, StringComparison.OrdinalIgnoreCase) &&
+                destinationPath.Length >= pathBase.Length)
+            {
+                // Use the encoded AbsolutePath and strip the encoded PathBase to preserve encoding
+                var encodedPathBase = Context.Request.PathBase.ToUriComponent();
+                var encodedDestPath = destination.AbsolutePath;
+                if (encodedDestPath.StartsWith(encodedPathBase, StringComparison.OrdinalIgnoreCase))
+                {
+                    destination = new Uri(encodedDestPath.Substring(encodedPathBase.Length));
+                }
+            }
         }
         
         var overwrite = WebDavHeaders.Overwrite ?? false;
@@ -75,7 +88,7 @@ internal class MoveHandler : RequestHandler
         var responses = new List<XElement>();
         foreach (var davError in errors)
         {
-            var href = new XElement(XmlNames.Href, $"{Context.Request.PathBase}{davError.Uri.AbsolutePath}");
+            var href = new XElement(XmlNames.Href, $"{Context.Request.PathBase.ToUriComponent()}{davError.Uri.AbsolutePath}");
             var status = new XElement(XmlNames.Status, $"HTTP/1.1 {(int)davError.StatusCode} {davError.StatusCode.GetDisplayName()}");
             var response = new XElement(XmlNames.Response, href, status);
             

@@ -86,7 +86,7 @@ internal static class HttpContextExtensions
     {
         ArgumentNullException.ThrowIfNull(context, nameof(context));
 
-        var href = new XElement(XmlNames.Href, $"{context.Request.PathBase}{uri.AbsolutePath}");
+        var href = new XElement(XmlNames.Href, $"{context.Request.PathBase.ToUriComponent()}{uri.AbsolutePath}");
         var lockTokenSubmitted = new XElement(XmlNames.LockTokenSubmitted, href);
         var error = new XElement(XmlNames.Error, lockTokenSubmitted);
         var document = new XDocument(
