@@ -108,16 +108,23 @@ public abstract class SqlLockManager : ILockManager, IDisposable
         if (connection.Value.State != ConnectionState.Open)
             await connection.Value.OpenAsync(cancellationToken);
 
-        await using var command = GetActiveLockByIdCommand(
+        string? id = null;
+
+        await using (var command = GetActiveLockByIdCommand(
             connection.Value,
             token.AbsoluteUri,
             uri.LocalPath,
-            (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds);
-        
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+            (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds))
         {
-            var id = reader.GetString("Id");
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                id = reader.GetString("Id");
+            }
+        }
+
+        if (id != null)
+        {
             await using var updateCommand = GetRefreshCommand(
                 connection.Value,
                 id,
@@ -128,7 +135,7 @@ public abstract class SqlLockManager : ILockManager, IDisposable
             if (affectedRows > 0)
                 return new LockResult(DavStatusCode.Ok);
         }
-        
+
         return new LockResult(DavStatusCode.PreconditionFailed);
     }
 
@@ -149,17 +156,24 @@ public abstract class SqlLockManager : ILockManager, IDisposable
         
         if (connection.Value.State != ConnectionState.Open)
             await connection.Value.OpenAsync(cancellationToken);
-        
-        await using var command = GetActiveLockByIdCommand(
+
+        string? id = null;
+
+        await using (var command = GetActiveLockByIdCommand(
             connection.Value,
             token.AbsoluteUri,
             uri.LocalPath,
-            (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds);
-        
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+            (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds))
         {
-            var id = reader.GetString("Id");
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                id = reader.GetString("Id");
+            }
+        }
+
+        if (id != null)
+        {
             await using var deleteCommand = GetDeleteCommand(connection.Value, id);
 
             var affectedRows = await deleteCommand.ExecuteNonQueryAsync(cancellationToken);

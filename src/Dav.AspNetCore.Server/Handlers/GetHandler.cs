@@ -111,29 +111,54 @@ internal class GetHandler : RequestHandler
             var range = requestHeaders.Range.Ranges.First();
 
             var bytesToRead = 0L;
+            var streamLength = stream.Length;
+
+            // Suffix range: last N bytes (e.g., "bytes=-500")
             if (range.From == null && range.To != null)
             {
-                stream.Seek(-range.To.Value, SeekOrigin.End);
-                bytesToRead = range.To.Value;
+                // If suffix length exceeds file size, return entire file
+                var suffixLength = Math.Min(range.To.Value, streamLength);
+                stream.Seek(-suffixLength, SeekOrigin.End);
+                bytesToRead = suffixLength;
             }
 
+            // Open-ended range: from byte N to end (e.g., "bytes=500-")
             if (range.From != null && range.To == null)
             {
+                // If start position is beyond file size, range is unsatisfiable
+                if (range.From.Value >= streamLength)
+                {
+                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
+                    return;
+                }
                 stream.Seek(range.From.Value, SeekOrigin.Begin);
-                bytesToRead = stream.Length - stream.Position;
+                bytesToRead = streamLength - stream.Position;
             }
 
+            // Bounded range (e.g., "bytes=500-999")
             if (range.From != null && range.To != null)
             {
                 // Validate range: From must be <= To
                 if (range.From.Value > range.To.Value)
                 {
                     context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                    context.Response.Headers["Content-Range"] = $"bytes */{stream.Length}";
+                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
                     return;
                 }
+
+                // If start position is beyond file size, range is unsatisfiable
+                if (range.From.Value >= streamLength)
+                {
+                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
+                    return;
+                }
+
+                // Clamp end position to file size - 1
+                var effectiveTo = Math.Min(range.To.Value, streamLength - 1);
                 stream.Seek(range.From.Value, SeekOrigin.Begin);
-                bytesToRead = range.To.Value - range.From.Value + 1;
+                bytesToRead = effectiveTo - range.From.Value + 1;
             }
 
             context.SetResult(DavStatusCode.PartialContent);

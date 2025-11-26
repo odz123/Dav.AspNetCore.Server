@@ -121,8 +121,9 @@ public class IfHeaderValue
                             return false;
 
                         negate = true;
-                        
-                        j += 3;
+
+                        // Move to the last character of "NOT" (j+2), loop will increment to j+3
+                        j += 2;
                         continue;
                     }
                     

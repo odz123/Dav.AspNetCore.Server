@@ -94,8 +94,8 @@ public abstract class SqlPropertyStore : IPropertyStore, IDisposable
             item.Uri.LocalPath);
 
         await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
-        
-        propertyCache.Remove(item);
+
+        propertyCache.TryRemove(item, out _);
     }
 
     /// <summary>
@@ -125,7 +125,12 @@ public abstract class SqlPropertyStore : IPropertyStore, IDisposable
         
         if (propertyCache.TryGetValue(source, out var propertyMap))
         {
-            propertyCache[destination] = propertyMap.ToDictionary(x => x.Key, x => x.Value);
+            var newCache = new ConcurrentDictionary<XName, PropertyData>();
+            foreach (var kvp in propertyMap)
+            {
+                newCache[kvp.Key] = kvp.Value;
+            }
+            propertyCache[destination] = newCache;
         }
     }
 

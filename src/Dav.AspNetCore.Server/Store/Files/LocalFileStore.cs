@@ -100,7 +100,7 @@ public class LocalFileStore : FileStore
         var path = GetSafePath(uri);
         return ValueTask.FromResult<Stream>(mode == OpenFileMode.Read
             ? System.IO.File.OpenRead(path)
-            : System.IO.File.OpenWrite(path));
+            : System.IO.File.Create(path));
     }
 
     public override ValueTask CreateDirectoryAsync(Uri uri, CancellationToken cancellationToken)
