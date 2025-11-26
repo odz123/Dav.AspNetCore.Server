@@ -63,7 +63,10 @@ internal static class DavStatusCodeExtensions
     public static string? GetDisplayName(this DavStatusCode statusCode)
     {
         var memberInfo = EnumType.GetMember(statusCode.ToString());
+        if (memberInfo.Length == 0)
+            return statusCode.ToString();
+
         var attribute = memberInfo[0].GetCustomAttribute<DavStatusCodeAttribute>(false);
-        return attribute?.DisplayName;
+        return attribute?.DisplayName ?? statusCode.ToString();
     }
 }

@@ -19,7 +19,13 @@ internal class PutHandler : RequestHandler
             return;
         }
 
-        await result.Item.WriteDataAsync(Context.Request.Body, cancellationToken);
+        var writeResult = await result.Item.WriteDataAsync(Context.Request.Body, cancellationToken);
+        if (writeResult != DavStatusCode.Ok)
+        {
+            Context.SetResult(writeResult);
+            return;
+        }
+
         Context.SetResult(itemExisted ? DavStatusCode.NoContent : DavStatusCode.Created);
     }
 }

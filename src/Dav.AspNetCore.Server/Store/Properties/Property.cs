@@ -147,13 +147,17 @@ public class Property
 
                     var timeoutValue = "Infinite";
                     if (resourceLock.Timeout != TimeSpan.Zero)
-                        timeoutValue = $"Second-{(resourceLock.ExpireDate - DateTime.UtcNow).TotalSeconds:F0}";
+                    {
+                        var remainingSeconds = Math.Max(0, (resourceLock.ExpireDate - DateTime.UtcNow).TotalSeconds);
+                        timeoutValue = $"Second-{remainingSeconds:F0}";
+                    }
 
                     activelock.Add(new XElement(XmlNames.Depth, resourceLock.Recursive ? "infinity" : "0"));
                     activelock.Add(new XElement(XmlNames.Owner, new XElement(XmlNames.Href, resourceLock.Owner)));
                     activelock.Add(new XElement(XmlNames.Timeout, timeoutValue));
                     activelock.Add(new XElement(XmlNames.LockToken, new XElement(XmlNames.Href, $"urn:uuid:{resourceLock.Id:D}")));
-                    activelock.Add(new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{httpContextAccessor?.HttpContext?.Request.PathBase.ToUriComponent()}{resourceLock.Uri.AbsolutePath}")));
+                    var pathBase = httpContextAccessor?.HttpContext?.Request?.PathBase.ToUriComponent() ?? string.Empty;
+                    activelock.Add(new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{pathBase}{resourceLock.Uri.AbsolutePath}")));
 
                     activeLocks.Add(activelock);
                 }
