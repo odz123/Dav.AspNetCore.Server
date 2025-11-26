@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Xml;
 using System.Xml.Linq;
 
@@ -11,8 +12,8 @@ public class XmlFilePropertyStore : IPropertyStore
 
     private readonly XmlFilePropertyStoreOptions options;
     private readonly string normalizedRootPath;
-    private readonly Dictionary<IStoreItem, Dictionary<XName, PropertyData>> propertyCache = new();
-    private readonly Dictionary<IStoreItem, bool> writeLookup = new();
+    private readonly ConcurrentDictionary<IStoreItem, ConcurrentDictionary<XName, PropertyData>> propertyCache = new();
+    private readonly ConcurrentDictionary<IStoreItem, bool> writeLookup = new();
 
     /// <summary>
     /// Initializes a new <see cref="XmlFilePropertyStore"/> class.
@@ -186,7 +187,7 @@ public class XmlFilePropertyStore : IPropertyStore
         var xmlFilePath = GetSafePath(item.Uri, ".xml");
         if (!File.Exists(xmlFilePath))
         {
-            propertyCache[item] = new Dictionary<XName, PropertyData>();
+            propertyCache[item] = new ConcurrentDictionary<XName, PropertyData>();
             return Array.Empty<PropertyData>();
         }
 
@@ -226,19 +227,20 @@ public class XmlFilePropertyStore : IPropertyStore
         }
         catch
         {
-            propertyCache[item] = new Dictionary<XName, PropertyData>();
+            propertyCache[item] = new ConcurrentDictionary<XName, PropertyData>();
             return propertyDataList;
         }
         finally
         {
             await fileStream.DisposeAsync();
         }
-        
-        propertyCache[item] = new Dictionary<XName, PropertyData>();
+
+        var newCache = new ConcurrentDictionary<XName, PropertyData>();
         foreach (var propertyData in propertyDataList)
         {
-            propertyCache[item][propertyData.Name] = propertyData;
+            newCache[propertyData.Name] = propertyData;
         }
+        propertyCache[item] = newCache;
         
         return propertyDataList;
     }

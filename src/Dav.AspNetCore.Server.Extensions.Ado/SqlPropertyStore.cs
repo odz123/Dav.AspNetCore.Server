@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Xml;
@@ -10,11 +11,11 @@ namespace Dav.AspNetCore.Server.Extensions;
 public abstract class SqlPropertyStore : IPropertyStore, IDisposable
 {
     private static readonly XName Property = XName.Get("Property", "https://github.com/ThuCommix/Dav.AspNetCore.Server");
-    
+
     private readonly SqlPropertyStoreOptions options;
     private readonly Lazy<DbConnection> connection;
-    private readonly Dictionary<IStoreItem, Dictionary<XName, PropertyData>> propertyCache = new();
-    private readonly Dictionary<IStoreItem, bool> writeLookup = new();
+    private readonly ConcurrentDictionary<IStoreItem, ConcurrentDictionary<XName, PropertyData>> propertyCache = new();
+    private readonly ConcurrentDictionary<IStoreItem, bool> writeLookup = new();
 
     /// <summary>
     /// Initializes a new <see cref="SqlPropertyStore"/> class.
@@ -212,11 +213,12 @@ public abstract class SqlPropertyStore : IPropertyStore, IDisposable
             propertyDataList.Add(new PropertyData(propertyName, propertyValue));
         }
         
-        propertyCache[item] = new Dictionary<XName, PropertyData>();
+        var newCache = new ConcurrentDictionary<XName, PropertyData>();
         foreach (var propertyData in propertyDataList)
         {
-            propertyCache[item][propertyData.Name] = propertyData;
+            newCache[propertyData.Name] = propertyData;
         }
+        propertyCache[item] = newCache;
 
         return propertyDataList;
     }

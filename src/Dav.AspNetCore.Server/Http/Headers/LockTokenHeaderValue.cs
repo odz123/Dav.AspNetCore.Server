@@ -46,7 +46,14 @@ public class LockTokenHeaderValue
         if (string.IsNullOrWhiteSpace(input))
             return false;
 
-        if (Uri.TryCreate(input.TrimStart('<').TrimEnd('>'), UriKind.RelativeOrAbsolute, out var uri))
+        var trimmedInput = input.Trim();
+
+        // Lock-Token header must be in format <uri> per RFC 4918
+        if (!trimmedInput.StartsWith('<') || !trimmedInput.EndsWith('>'))
+            return false;
+
+        var uriString = trimmedInput[1..^1]; // Remove the surrounding < and >
+        if (Uri.TryCreate(uriString, UriKind.RelativeOrAbsolute, out var uri))
         {
             parsedValue = new LockTokenHeaderValue(uri);
             return true;

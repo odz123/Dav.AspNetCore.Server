@@ -125,10 +125,17 @@ internal class GetHandler : RequestHandler
 
             if (range.From != null && range.To != null)
             {
+                // Validate range: From must be <= To
+                if (range.From.Value > range.To.Value)
+                {
+                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+                    context.Response.Headers["Content-Range"] = $"bytes */{stream.Length}";
+                    return;
+                }
                 stream.Seek(range.From.Value, SeekOrigin.Begin);
                 bytesToRead = range.To.Value - range.From.Value + 1;
             }
-            
+
             context.SetResult(DavStatusCode.PartialContent);
 
             var rangeStart = stream.Position;
