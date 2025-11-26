@@ -78,8 +78,10 @@ public class Directory : IStoreCollection
         }
 
         var result = await destination.CreateCollectionAsync(name, cancellationToken);
-        if (result.Collection != null)
-            store.ItemCache[result.Collection.Uri] = result.Collection;
+        if (result.Collection == null)
+            return ItemResult.Fail(result.StatusCode);
+
+        store.ItemCache[result.Collection.Uri] = result.Collection;
 
         return existingItem != null
             ? ItemResult.NoContent(result.Collection)

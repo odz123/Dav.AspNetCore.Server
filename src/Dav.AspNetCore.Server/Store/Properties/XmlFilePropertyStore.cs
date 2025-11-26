@@ -187,7 +187,7 @@ public class XmlFilePropertyStore : IPropertyStore
         ArgumentNullException.ThrowIfNull(item, nameof(item));
         
         if (propertyCache.TryGetValue(item, out var propertyMap))
-            return propertyMap.Values;
+            return propertyMap.Values.ToArray();
         
         var xmlFilePath = GetSafePath(item.Uri, ".xml");
         if (!File.Exists(xmlFilePath))
@@ -205,7 +205,7 @@ public class XmlFilePropertyStore : IPropertyStore
             var propertyStore = document.Element(PropertyStore);
             var properties = propertyStore?.Elements(Property)
                 .Select(x => x.Elements().FirstOrDefault())
-                .Where(x => x != null);
+                .OfType<XElement>();
             if (properties == null)
             {
                 propertyCache[item] = new ConcurrentDictionary<XName, PropertyData>();

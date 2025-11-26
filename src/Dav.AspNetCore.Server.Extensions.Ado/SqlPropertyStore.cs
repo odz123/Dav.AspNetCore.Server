@@ -185,7 +185,7 @@ public abstract class SqlPropertyStore : IPropertyStore, IDisposable
         ArgumentNullException.ThrowIfNull(item, nameof(item));
         
         if (propertyCache.TryGetValue(item, out var propertyMap))
-            return propertyMap.Values;
+            return propertyMap.Values.ToArray();
         
         if (connection.Value.State != ConnectionState.Open)
             await connection.Value.OpenAsync(cancellationToken);
