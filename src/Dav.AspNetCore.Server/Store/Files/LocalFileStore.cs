@@ -116,8 +116,12 @@ public class LocalFileStore : FileStore
         var path = GetSafePath(uri);
         return ValueTask.FromResult(System.IO.Directory.GetFiles(path).Select(x =>
         {
-            var relativePath = $"/{Path.GetRelativePath(options.RootPath, x)}";
-            return new Uri(relativePath);
+            var relativePath = Path.GetRelativePath(options.RootPath, x);
+            // Properly encode each path segment to handle special characters like # and ?
+            var encodedPath = "/" + string.Join("/",
+                relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Select(segment => Uri.EscapeDataString(segment)));
+            return new Uri(encodedPath);
         }).ToArray());
     }
 
@@ -126,8 +130,12 @@ public class LocalFileStore : FileStore
         var path = GetSafePath(uri);
         return ValueTask.FromResult(System.IO.Directory.GetDirectories(path).Select(x =>
         {
-            var relativePath = $"/{Path.GetRelativePath(options.RootPath, x)}";
-            return new Uri(relativePath);
+            var relativePath = Path.GetRelativePath(options.RootPath, x);
+            // Properly encode each path segment to handle special characters like # and ?
+            var encodedPath = "/" + string.Join("/",
+                relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Select(segment => Uri.EscapeDataString(segment)));
+            return new Uri(encodedPath);
         }).ToArray());
     }
 }

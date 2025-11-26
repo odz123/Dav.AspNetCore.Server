@@ -47,7 +47,13 @@ internal class CopyHandler : RequestHandler
             if (destinationPath.StartsWith(pathBase, StringComparison.OrdinalIgnoreCase) &&
                 destinationPath.Length >= pathBase.Length)
             {
-                destination = new Uri(destinationPath.Substring(pathBase.Length));
+                // Use the encoded AbsolutePath and strip the encoded PathBase to preserve encoding
+                var encodedPathBase = Context.Request.PathBase.ToUriComponent();
+                var encodedDestPath = destination.AbsolutePath;
+                if (encodedDestPath.StartsWith(encodedPathBase, StringComparison.OrdinalIgnoreCase))
+                {
+                    destination = new Uri(encodedDestPath.Substring(encodedPathBase.Length));
+                }
             }
         }
         
