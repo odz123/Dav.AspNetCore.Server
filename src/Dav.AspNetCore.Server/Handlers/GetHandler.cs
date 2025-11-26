@@ -71,7 +71,8 @@ internal class GetHandler : RequestHandler
 
             if (requestHeaders.IfRange.LastModified != null &&
                 !string.IsNullOrWhiteSpace(lastModified) &&
-                requestHeaders.IfRange.LastModified != DateTimeOffset.Parse(lastModified))
+                DateTimeOffset.TryParse(lastModified, out var parsedLastModified) &&
+                requestHeaders.IfRange.LastModified != parsedLastModified)
             {
                 disableRanges = true;
             }

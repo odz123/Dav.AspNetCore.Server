@@ -45,17 +45,21 @@ public class DepthHeaderValue
         if (string.IsNullOrWhiteSpace(input))
             return false;
 
-        switch (input.Trim())
+        var trimmedInput = input.Trim();
+        if (trimmedInput == "0")
         {
-            case "0":
-                parsedValue = new DepthHeaderValue(Depth.None);
-                return true;
-            case "1":
-                parsedValue = new DepthHeaderValue(Depth.One);
-                return true;
-            case "infinity":
-                parsedValue = new DepthHeaderValue(Depth.Infinity);
-                return true;
+            parsedValue = new DepthHeaderValue(Depth.None);
+            return true;
+        }
+        if (trimmedInput == "1")
+        {
+            parsedValue = new DepthHeaderValue(Depth.One);
+            return true;
+        }
+        if (trimmedInput.Equals("infinity", StringComparison.OrdinalIgnoreCase))
+        {
+            parsedValue = new DepthHeaderValue(Depth.Infinity);
+            return true;
         }
 
         return false;

@@ -155,7 +155,7 @@ public class Property
                     activelock.Add(new XElement(XmlNames.Depth, resourceLock.Recursive ? "infinity" : "0"));
                     activelock.Add(new XElement(XmlNames.Owner, new XElement(XmlNames.Href, resourceLock.Owner)));
                     activelock.Add(new XElement(XmlNames.Timeout, timeoutValue));
-                    activelock.Add(new XElement(XmlNames.LockToken, new XElement(XmlNames.Href, $"urn:uuid:{resourceLock.Id:D}")));
+                    activelock.Add(new XElement(XmlNames.LockToken, new XElement(XmlNames.Href, resourceLock.Id.AbsoluteUri)));
                     var pathBase = httpContextAccessor?.HttpContext?.Request?.PathBase.ToUriComponent() ?? string.Empty;
                     activelock.Add(new XElement(XmlNames.LockRoot, new XElement(XmlNames.Href, $"{pathBase}{resourceLock.Uri.AbsolutePath}")));
 

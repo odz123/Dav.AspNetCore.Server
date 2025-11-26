@@ -230,7 +230,8 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// </summary>
     public void Dispose()
     {
-        connection.Value.Dispose();
+        if (connection.IsValueCreated)
+            connection.Value.Dispose();
     }
 
     /// <summary>

@@ -113,11 +113,10 @@ public class Directory : IStoreCollection
             items.Add(item);
         }
 
-        // Store as immutable to prevent cache corruption from external modifications
-        var readOnlyItems = items.AsReadOnly();
-        store.CollectionCache[Uri] = items;
+        // Store a copy to prevent cache corruption from external modifications
+        store.CollectionCache[Uri] = new List<IStoreItem>(items);
 
-        return readOnlyItems;
+        return items.AsReadOnly();
     }
 
     /// <summary>
