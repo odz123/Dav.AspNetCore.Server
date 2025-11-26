@@ -199,7 +199,7 @@ public abstract class SqlLockManager : ILockManager, IDisposable
         {
             var resourceLock = new ResourceLock(
                 new Uri(reader.GetString("Id")),
-                new Uri(reader.GetString("Id")),
+                new Uri(reader.GetString("Uri"), UriKind.Relative),
                 (LockType)reader.GetInt32("LockType"),
                 XElement.Parse(reader.GetString("Owner")),
                 reader.GetBoolean("Recursive"),
