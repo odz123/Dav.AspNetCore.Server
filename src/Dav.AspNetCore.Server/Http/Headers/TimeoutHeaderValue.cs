@@ -50,7 +50,7 @@ public class TimeoutHeaderValue
 
         foreach (var value in values)
         {
-            if (value.Equals("Infinite", StringComparison.CurrentCultureIgnoreCase))
+            if (value.Equals("Infinite", StringComparison.OrdinalIgnoreCase))
             {
                 timeouts.Add(TimeSpan.Zero);
                 continue;

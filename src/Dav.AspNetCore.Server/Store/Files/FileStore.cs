@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace Dav.AspNetCore.Server.Store.Files;
 
 public abstract class FileStore : IStore
@@ -5,12 +7,12 @@ public abstract class FileStore : IStore
     /// <summary>
     /// Gets the item cache.
     /// </summary>
-    internal Dictionary<Uri, IStoreItem?> ItemCache { get; } = new();
+    internal ConcurrentDictionary<Uri, IStoreItem?> ItemCache { get; } = new();
 
     /// <summary>
     /// Gets the collection cache.
     /// </summary>
-    internal Dictionary<Uri, List<IStoreItem>> CollectionCache { get; } = new();
+    internal ConcurrentDictionary<Uri, List<IStoreItem>> CollectionCache { get; } = new();
     
     /// <summary>
     /// A value indicating whether caching will be disabled.

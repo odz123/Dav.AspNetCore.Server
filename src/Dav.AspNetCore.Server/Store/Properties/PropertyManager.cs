@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Xml.Linq;
 
 namespace Dav.AspNetCore.Server.Store.Properties;
@@ -6,7 +7,7 @@ public class PropertyManager : IPropertyManager
 {
     private readonly IServiceProvider services;
     private readonly IPropertyStore? propertyStore;
-    private readonly Dictionary<IStoreItem, Dictionary<XName, PropertyResult>> propertyCache = new();
+    private readonly ConcurrentDictionary<IStoreItem, ConcurrentDictionary<XName, PropertyResult>> propertyCache = new();
 
     /// <summary>
     /// Initializes a new <see cref="PropertyManager"/> class.
@@ -189,15 +190,13 @@ public class PropertyManager : IPropertyManager
     private PropertyResult CreateCachedResult(
         IStoreItem item,
         XName propertyName,
-        DavStatusCode statusCode, 
+        DavStatusCode statusCode,
         object? value)
     {
         var result = new PropertyResult(statusCode, value);
-        if (!propertyCache.ContainsKey(item))
-            propertyCache[item] = new Dictionary<XName, PropertyResult>();
-        
-        propertyCache[item][propertyName] = result;
-        
+        var itemCache = propertyCache.GetOrAdd(item, _ => new ConcurrentDictionary<XName, PropertyResult>());
+        itemCache[propertyName] = result;
+
         return result;
     }
 }
