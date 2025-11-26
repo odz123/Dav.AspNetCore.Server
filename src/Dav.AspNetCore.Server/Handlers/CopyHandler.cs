@@ -38,10 +38,17 @@ internal class CopyHandler : RequestHandler
         var depth = WebDavHeaders.Depth ?? Depth.Infinity;
 
         var destination = WebDavHeaders.Destination;
-        if (!string.IsNullOrWhiteSpace(Context.Request.PathBase))
+        if (Context.Request.PathBase.HasValue)
         {
-            if (Context.Request.PathBase.HasValue)
-                destination = new Uri(destination.LocalPath.Substring(Context.Request.PathBase.Value.Length));
+            var pathBase = Context.Request.PathBase.Value;
+            var destinationPath = destination.LocalPath;
+
+            // Only strip PathBase if the destination actually starts with it
+            if (destinationPath.StartsWith(pathBase, StringComparison.OrdinalIgnoreCase) &&
+                destinationPath.Length >= pathBase.Length)
+            {
+                destination = new Uri(destinationPath.Substring(pathBase.Length));
+            }
         }
         
         var overwrite = WebDavHeaders.Overwrite ?? false;

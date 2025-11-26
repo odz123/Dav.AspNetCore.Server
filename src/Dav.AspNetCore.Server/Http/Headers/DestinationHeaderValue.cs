@@ -47,6 +47,7 @@ public class DestinationHeaderValue
         if (string.IsNullOrWhiteSpace(input))
             return false;
 
+        // Try to parse as absolute URI (e.g., http://host/path)
         if (Uri.TryCreate(input, UriKind.Absolute, out var uri))
         {
             var pathString = new PathString(uri.LocalPath);
@@ -54,13 +55,10 @@ public class DestinationHeaderValue
             return true;
         }
 
-        if(!input.StartsWith("/") && Uri.TryCreate($"/{input}", UriKind.Absolute, out var uri2))
-        {
-            var pathString = new PathString(uri2.LocalPath);
-            parsedValue = new DestinationHeaderValue(pathString.ToUri());
-            return true;
-        }
-
-        return false;
+        // Handle relative paths (e.g., "/path" or "path")
+        var relativePath = input.StartsWith("/") ? input : $"/{input}";
+        var relativePathString = new PathString(relativePath);
+        parsedValue = new DestinationHeaderValue(relativePathString.ToUri());
+        return true;
     }
 }
