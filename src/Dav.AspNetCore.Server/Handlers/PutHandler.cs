@@ -11,13 +11,15 @@ internal class PutHandler : RequestHandler
     {
         var requestUri = Context.Request.Path.ToUri();
         var itemName = requestUri.GetRelativeUri(Collection.Uri).LocalPath.Trim('/');
+        var itemExisted = Item != null;
         var result = await Collection.CreateItemAsync(itemName, cancellationToken);
         if (result.Item == null)
         {
             Context.SetResult(result.StatusCode);
             return;
         }
-        
+
         await result.Item.WriteDataAsync(Context.Request.Body, cancellationToken);
+        Context.SetResult(itemExisted ? DavStatusCode.NoContent : DavStatusCode.Created);
     }
 }

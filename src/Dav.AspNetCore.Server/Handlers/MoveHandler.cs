@@ -68,7 +68,7 @@ internal class MoveHandler : RequestHandler
         {
             Context.SetResult(destinationItem != null
                 ? DavStatusCode.NoContent
-                : DavStatusCode.Ok);
+                : DavStatusCode.Created);
             return;
         }
         

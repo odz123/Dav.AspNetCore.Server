@@ -28,11 +28,19 @@ internal class BasicAuthenticationHandler : AuthenticationHandler<BasicAuthentic
         if (!authorizationHeader.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
             return AuthenticateResult.NoResult();
 
-        var credentialsBase64 = Encoding.UTF8.GetString(
-            Convert.FromBase64String(authorizationHeader.Replace("Basic ", "", StringComparison.OrdinalIgnoreCase)));
-        
+        string credentialsBase64;
+        try
+        {
+            credentialsBase64 = Encoding.UTF8.GetString(
+                Convert.FromBase64String(authorizationHeader.Replace("Basic ", "", StringComparison.OrdinalIgnoreCase)));
+        }
+        catch (FormatException)
+        {
+            return AuthenticateResult.Fail("Invalid Base64 in Authorization header");
+        }
+
         var credentialParts = credentialsBase64.Split(new[] { ':' }, 2);
-        
+
         if (credentialParts.Length != 2)
             return AuthenticateResult.Fail("Invalid Authorization header format");
 

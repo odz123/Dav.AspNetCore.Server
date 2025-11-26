@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -11,7 +12,8 @@ namespace Dav.AspNetCore.Server.Authentication;
 
 internal class DigestAuthenticationHandler : AuthenticationHandler<DigestAuthenticationSchemeOptions>
 {
-    private static readonly List<Guid> OpaqueIds = new();
+    private static readonly ConcurrentDictionary<Guid, DateTime> OpaqueIds = new();
+    private static readonly TimeSpan OpaqueExpiration = TimeSpan.FromHours(1);
 
     public DigestAuthenticationHandler(
         IOptionsMonitor<DigestAuthenticationSchemeOptions> options, 
@@ -31,10 +33,19 @@ internal class DigestAuthenticationHandler : AuthenticationHandler<DigestAuthent
         if (!authorizationHeader.StartsWith("Digest ", StringComparison.OrdinalIgnoreCase))
             return AuthenticateResult.NoResult();
 
-        var parameters = authorizationHeader.Replace("Digest ", string.Empty)
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-            .Select(x => x.Split('=', StringSplitOptions.TrimEntries))
-            .ToDictionary(x => x[0], x => x[1].Trim('"'));
+        Dictionary<string, string> parameters;
+        try
+        {
+            parameters = authorizationHeader.Replace("Digest ", string.Empty)
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Split('=', 2, StringSplitOptions.TrimEntries))
+                .Where(x => x.Length == 2)
+                .ToDictionary(x => x[0], x => x[1].Trim('"'));
+        }
+        catch
+        {
+            return AuthenticateResult.NoResult();
+        }
 
         if (!parameters.TryGetValue("username", out var userName))
             return AuthenticateResult.NoResult();
@@ -63,8 +74,11 @@ internal class DigestAuthenticationHandler : AuthenticationHandler<DigestAuthent
         if (!Guid.TryParse(opaque, out var opaqueId))
             return AuthenticateResult.Fail("Opaque could not be parsed.");
 
-        if (!OpaqueIds.Contains(opaqueId))
+        if (!OpaqueIds.TryGetValue(opaqueId, out var createdAt) || DateTime.UtcNow - createdAt > OpaqueExpiration)
+        {
+            OpaqueIds.TryRemove(opaqueId, out _);
             return AuthenticateResult.NoResult();
+        }
         
         if (Options.Events.OnPasswordRequested == null)
             return AuthenticateResult.NoResult();
@@ -131,8 +145,16 @@ internal class DigestAuthenticationHandler : AuthenticationHandler<DigestAuthent
 
     private string GenerateOpaque()
     {
+        // Clean up expired opaque IDs periodically
+        var now = DateTime.UtcNow;
+        foreach (var kvp in OpaqueIds)
+        {
+            if (now - kvp.Value > OpaqueExpiration)
+                OpaqueIds.TryRemove(kvp.Key, out _);
+        }
+
         var guid = Guid.NewGuid();
-        OpaqueIds.Add(guid);
+        OpaqueIds[guid] = now;
 
         return guid.ToString("N");
     }
