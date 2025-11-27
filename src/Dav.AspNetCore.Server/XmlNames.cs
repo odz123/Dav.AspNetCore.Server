@@ -2,7 +2,7 @@ using System.Xml.Linq;
 
 namespace Dav.AspNetCore.Server;
 
-internal static class XmlNames
+public static class XmlNames
 {
     public static readonly string Namespace = "DAV:";
     
