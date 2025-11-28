@@ -241,7 +241,7 @@ internal class GetHandler : RequestHandler
             if (pattern == FileAccessPattern.RandomAccess &&
                 MemoryMappedFilePool.ShouldUseMemoryMapping(contentLength, pattern))
             {
-                var lastModified = optimizedItem?.LastModified ?? DateTime.UtcNow;
+                var lastModified = System.IO.File.GetLastWriteTimeUtc(physicalPath);
                 var mappedStream = MemoryMappedFilePool.Instance.GetMappedRangeStream(
                     physicalPath, contentLength, lastModified, offset, length);
 

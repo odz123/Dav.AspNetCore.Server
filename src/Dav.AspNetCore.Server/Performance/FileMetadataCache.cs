@@ -27,12 +27,12 @@ internal sealed class FileMetadataCache
     /// </summary>
     private static readonly TimeSpan MaxAge = TimeSpan.FromMinutes(5);
 
-    private readonly LruCache<string, CachedMetadata> _cache;
+    private readonly LruCache<string, CachedMetadata?> _cache;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks;
 
     private FileMetadataCache()
     {
-        _cache = new LruCache<string, CachedMetadata>(MaxCacheSize);
+        _cache = new LruCache<string, CachedMetadata?>(MaxCacheSize);
         _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
     }
 
@@ -49,16 +49,16 @@ internal sealed class FileMetadataCache
         var now = DateTime.UtcNow;
 
         // Try to get from cache
-        if (_cache.TryGetValue(physicalPath, out var cached) && cached != null)
+        if (_cache.TryGetValue(physicalPath, out var cached) && cached.HasValue)
         {
             // Check if still fresh
-            if (now - cached.CachedAt < CacheTtl)
+            if (now - cached.Value.CachedAt < CacheTtl)
             {
                 return cached;
             }
 
             // Stale but within max age - return stale and refresh in background
-            if (now - cached.CachedAt < MaxAge)
+            if (now - cached.Value.CachedAt < MaxAge)
             {
                 // Trigger background refresh
                 _ = Task.Run(() => RefreshMetadataAsync(physicalPath));
@@ -82,15 +82,15 @@ internal sealed class FileMetadataCache
         var now = DateTime.UtcNow;
 
         // Try to get from cache
-        if (_cache.TryGetValue(physicalPath, out var cached) && cached != null)
+        if (_cache.TryGetValue(physicalPath, out var cached) && cached.HasValue)
         {
-            if (now - cached.CachedAt < CacheTtl)
+            if (now - cached.Value.CachedAt < CacheTtl)
             {
                 return cached;
             }
 
             // Stale but usable - return immediately and refresh in background
-            if (now - cached.CachedAt < MaxAge)
+            if (now - cached.Value.CachedAt < MaxAge)
             {
                 _ = RefreshMetadataAsync(physicalPath);
                 return cached;
@@ -105,9 +105,9 @@ internal sealed class FileMetadataCache
             await lockObj.WaitAsync(cancellationToken).ConfigureAwait(false);
 
             // Double-check after acquiring lock
-            if (_cache.TryGetValue(physicalPath, out cached) && cached != null)
+            if (_cache.TryGetValue(physicalPath, out cached) && cached.HasValue)
             {
-                if (now - cached.CachedAt < CacheTtl)
+                if (now - cached.Value.CachedAt < CacheTtl)
                 {
                     return cached;
                 }
@@ -138,9 +138,9 @@ internal sealed class FileMetadataCache
             return;
 
         // Don't preload if already fresh
-        if (_cache.TryGetValue(physicalPath, out var cached) && cached != null)
+        if (_cache.TryGetValue(physicalPath, out var cached) && cached.HasValue)
         {
-            if (DateTime.UtcNow - cached.CachedAt < CacheTtl)
+            if (DateTime.UtcNow - cached.Value.CachedAt < CacheTtl)
                 return;
         }
 
@@ -174,7 +174,7 @@ internal sealed class FileMetadataCache
             var metadata = new CachedMetadata(
                 fileInfo.Length,
                 fileInfo.LastWriteTimeUtc,
-                MimeTypeCache.Instance.GetMimeType(physicalPath),
+                MimeTypeCache.GetMimeType(physicalPath),
                 DateTime.UtcNow);
 
             _cache.Set(physicalPath, metadata);
