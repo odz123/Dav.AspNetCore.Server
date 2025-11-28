@@ -24,15 +24,24 @@ internal class LockHandler : RequestHandler
         }
         else
         {
-            timeout = WebDavHeaders.Timeouts
-                .OrderByDescending(x => x.TotalSeconds)
-                .FirstOrDefault(x => x <= (Options.MaxLockTimeout ?? TimeSpan.MaxValue));
+            // Find the largest timeout that doesn't exceed MaxLockTimeout (O(n) instead of O(n log n) sort)
+            var maxAllowed = Options.MaxLockTimeout ?? TimeSpan.MaxValue;
+            timeout = default;
+            var hasInfinite = false;
+
+            foreach (var t in WebDavHeaders.Timeouts)
+            {
+                if (t == TimeSpan.Zero)
+                    hasInfinite = true;
+                else if (t <= maxAllowed && t > timeout)
+                    timeout = t;
+            }
 
             // If no valid timeout found (all requested timeouts exceed MaxLockTimeout), use MaxLockTimeout
             if (timeout == default && Options.MaxLockTimeout != null)
                 timeout = Options.MaxLockTimeout.Value;
 
-            if (WebDavHeaders.Timeouts.Any(x => x == TimeSpan.Zero) && Options.MaxLockTimeout == null)
+            if (hasInfinite && Options.MaxLockTimeout == null)
                 timeout = TimeSpan.Zero;
         }
 
@@ -80,8 +89,8 @@ internal class LockHandler : RequestHandler
                 cancellationToken);
         }
         else if (Context.Request.ContentType != null &&
-                 (Context.Request.ContentType.Contains("application/xml") ||
-                  Context.Request.ContentType.Contains("text/xml")) &&
+                 (Context.Request.ContentType.Contains("application/xml", StringComparison.OrdinalIgnoreCase) ||
+                  Context.Request.ContentType.Contains("text/xml", StringComparison.OrdinalIgnoreCase)) &&
                  (Context.Request.ContentLength is null or > 0))
         {
             var requestDocument = await Context.ReadDocumentAsync(cancellationToken);

@@ -12,6 +12,8 @@ namespace Dav.AspNetCore.Server.Handlers;
 internal abstract class RequestHandler : IRequestHandler
 {
     private readonly Dictionary<Uri, IReadOnlyCollection<ResourceLock>> lockCache = new();
+    private readonly Dictionary<Uri, string?> etagCache = new();
+    private readonly Dictionary<Uri, DateTimeOffset?> lastModifiedCache = new();
     private IPropertyStore? propertyStore;
 
     private static readonly List<string> SkipLockValidation = new()
@@ -272,9 +274,7 @@ internal abstract class RequestHandler : IRequestHandler
                     string? itemEtag = null;
                     if (item != null)
                     {
-                        var etagResult = await PropertyManager.GetPropertyAsync(item, XmlNames.GetEtag, cancellationToken);
-                        if (etagResult.IsSuccess)
-                            itemEtag = (string?)etagResult.Value;
+                        itemEtag = await GetCachedEtagAsync(item, cancellationToken);
                     }
 
                     foreach (var tag in condition.Tags)
@@ -344,9 +344,7 @@ internal abstract class RequestHandler : IRequestHandler
                 string? itemEtag = null;
                 if (Item != null)
                 {
-                    var etagResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetEtag, cancellationToken);
-                    if (etagResult.IsSuccess)
-                        itemEtag = (string?)etagResult.Value;
+                    itemEtag = await GetCachedEtagAsync(Item, cancellationToken);
                 }
 
                 if (requestHeaders.IfMatch.All(x => x.Tag != $"\"{itemEtag}\""))
@@ -362,7 +360,7 @@ internal abstract class RequestHandler : IRequestHandler
             var statusCode = Context.Request.Method is WebDavMethods.Get or WebDavMethods.Head or WebDavMethods.PropFind
                 ? DavStatusCode.NotModified
                 : DavStatusCode.PreconditionFailed;
-            
+
             if (requestHeaders.IfNoneMatch.Count == 1 && requestHeaders.IfNoneMatch[0].Tag == "*")
             {
                 if (Item != null)
@@ -376,26 +374,22 @@ internal abstract class RequestHandler : IRequestHandler
                 string? itemEtag = null;
                 if (Item != null)
                 {
-                    var etagResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetEtag, cancellationToken);
-                    if (etagResult.IsSuccess)
-                        itemEtag = (string?)etagResult.Value;
+                    itemEtag = await GetCachedEtagAsync(Item, cancellationToken);
                 }
 
                 if (requestHeaders.IfNoneMatch.Any(x => x.Tag == $"\"{itemEtag}\""))
                 {
                     Context.SetResult(statusCode);
                     return false;
-                }  
+                }
             }
         }
         else if (requestHeaders.IfUnmodifiedSince != null)
         {
             if (Item != null)
             {
-                var modifiedResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetLastModified, cancellationToken);
-                if (modifiedResult.IsSuccess &&
-                    DateTimeOffset.TryParse(modifiedResult.Value?.ToString(), out var lastModified) &&
-                    lastModified > requestHeaders.IfUnmodifiedSince)
+                var lastModified = await GetCachedLastModifiedAsync(Item, cancellationToken);
+                if (lastModified.HasValue && lastModified.Value > requestHeaders.IfUnmodifiedSince)
                 {
                     Context.SetResult(DavStatusCode.PreconditionFailed);
                     return false;
@@ -409,10 +403,8 @@ internal abstract class RequestHandler : IRequestHandler
         {
             if (Item != null)
             {
-                var modifiedResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetLastModified, cancellationToken);
-                if (modifiedResult.IsSuccess &&
-                    DateTimeOffset.TryParse(modifiedResult.Value?.ToString(), out var lastModified) &&
-                    lastModified <= requestHeaders.IfModifiedSince)
+                var lastModified = await GetCachedLastModifiedAsync(Item, cancellationToken);
+                if (lastModified.HasValue && lastModified.Value <= requestHeaders.IfModifiedSince)
                 {
                     Context.SetResult(DavStatusCode.NotModified);
                     return false;
@@ -427,6 +419,38 @@ internal abstract class RequestHandler : IRequestHandler
     {
         if (!lockCache.ContainsKey(uri))
             lockCache[uri] = await LockManager.GetLocksAsync(uri, cancellationToken);
+    }
+
+    private async ValueTask<string?> GetCachedEtagAsync(IStoreItem item, CancellationToken cancellationToken = default)
+    {
+        var uri = item.Uri;
+        if (uri != null && etagCache.TryGetValue(uri, out var cachedEtag))
+            return cachedEtag;
+
+        var etagResult = await PropertyManager.GetPropertyAsync(item, XmlNames.GetEtag, cancellationToken);
+        var etag = etagResult.IsSuccess ? (string?)etagResult.Value : null;
+
+        if (uri != null)
+            etagCache[uri] = etag;
+
+        return etag;
+    }
+
+    private async ValueTask<DateTimeOffset?> GetCachedLastModifiedAsync(IStoreItem item, CancellationToken cancellationToken = default)
+    {
+        var uri = item.Uri;
+        if (uri != null && lastModifiedCache.TryGetValue(uri, out var cachedLastModified))
+            return cachedLastModified;
+
+        var modifiedResult = await PropertyManager.GetPropertyAsync(item, XmlNames.GetLastModified, cancellationToken);
+        DateTimeOffset? lastModified = null;
+        if (modifiedResult.IsSuccess && DateTimeOffset.TryParse(modifiedResult.Value?.ToString(), out var parsed))
+            lastModified = parsed;
+
+        if (uri != null)
+            lastModifiedCache[uri] = lastModified;
+
+        return lastModified;
     }
 
     /// <summary>

@@ -1,3 +1,5 @@
+using Dav.AspNetCore.Server.Performance;
+
 namespace Dav.AspNetCore.Server.Store.Files;
 
 public class LocalFileStore : FileStore
@@ -114,28 +116,55 @@ public class LocalFileStore : FileStore
     public override ValueTask<Uri[]> GetFilesAsync(Uri uri, CancellationToken cancellationToken)
     {
         var path = GetSafePath(uri);
-        return ValueTask.FromResult(System.IO.Directory.GetFiles(path).Select(x =>
+        var files = System.IO.Directory.GetFiles(path);
+        var result = new Uri[files.Length];
+
+        for (var i = 0; i < files.Length; i++)
         {
-            var relativePath = Path.GetRelativePath(options.RootPath, x);
-            // Properly encode each path segment to handle special characters like # and ?
-            var encodedPath = "/" + string.Join("/",
-                relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                    .Select(segment => Uri.EscapeDataString(segment)));
-            return new Uri(encodedPath);
-        }).ToArray());
+            result[i] = BuildEncodedUri(files[i]);
+        }
+
+        return ValueTask.FromResult(result);
     }
 
     public override ValueTask<Uri[]> GetDirectoriesAsync(Uri uri, CancellationToken cancellationToken)
     {
         var path = GetSafePath(uri);
-        return ValueTask.FromResult(System.IO.Directory.GetDirectories(path).Select(x =>
+        var directories = System.IO.Directory.GetDirectories(path);
+        var result = new Uri[directories.Length];
+
+        for (var i = 0; i < directories.Length; i++)
         {
-            var relativePath = Path.GetRelativePath(options.RootPath, x);
-            // Properly encode each path segment to handle special characters like # and ?
-            var encodedPath = "/" + string.Join("/",
-                relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                    .Select(segment => Uri.EscapeDataString(segment)));
-            return new Uri(encodedPath);
-        }).ToArray());
+            result[i] = BuildEncodedUri(directories[i]);
+        }
+
+        return ValueTask.FromResult(result);
+    }
+
+    /// <summary>
+    /// Builds an encoded URI from a file system path using StringBuilder for efficiency.
+    /// </summary>
+    private Uri BuildEncodedUri(string fullPath)
+    {
+        var relativePath = Path.GetRelativePath(options.RootPath, fullPath);
+        var segments = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        var sb = StringBuilderPool.Rent();
+        try
+        {
+            sb.Append('/');
+            for (var i = 0; i < segments.Length; i++)
+            {
+                if (i > 0)
+                    sb.Append('/');
+                sb.Append(Uri.EscapeDataString(segments[i]));
+            }
+
+            return new Uri(sb.ToString());
+        }
+        finally
+        {
+            StringBuilderPool.Return(sb);
+        }
     }
 }

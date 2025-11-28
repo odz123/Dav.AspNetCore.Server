@@ -4,6 +4,7 @@ namespace Dav.AspNetCore.Server.Performance;
 
 /// <summary>
 /// A thread-safe LRU (Least Recently Used) cache with bounded capacity.
+/// Uses ReaderWriterLockSlim for better read concurrency.
 /// </summary>
 /// <typeparam name="TKey">The type of the cache key.</typeparam>
 /// <typeparam name="TValue">The type of the cached value.</typeparam>
@@ -12,7 +13,7 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     private readonly int _capacity;
     private readonly ConcurrentDictionary<TKey, LinkedListNode<CacheEntry>> _cache;
     private readonly LinkedList<CacheEntry> _lruList;
-    private readonly object _lock = new();
+    private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.NoRecursion);
 
     private sealed class CacheEntry
     {
@@ -55,7 +56,9 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     {
         if (_cache.TryGetValue(key, out var node))
         {
-            lock (_lock)
+            // Use write lock only for LRU list reordering
+            _rwLock.EnterWriteLock();
+            try
             {
                 // Move to front (most recently used)
                 if (node.List != null)
@@ -63,6 +66,10 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
                     _lruList.Remove(node);
                     _lruList.AddFirst(node);
                 }
+            }
+            finally
+            {
+                _rwLock.ExitWriteLock();
             }
             value = node.Value.Value;
             return true;
@@ -79,7 +86,8 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// <param name="value">The value.</param>
     public void Set(TKey key, TValue value)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_cache.TryGetValue(key, out var existingNode))
             {
@@ -105,6 +113,10 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
                     _cache.TryRemove(lastNode.Value.Key, out _);
                 }
             }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
     }
 
@@ -147,7 +159,8 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// <returns>True if the key was removed, false if it wasn't found.</returns>
     public bool TryRemove(TKey key, out TValue? value)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_cache.TryRemove(key, out var node))
             {
@@ -155,6 +168,10 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
                 value = node.Value.Value;
                 return true;
             }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
 
         value = default;
@@ -166,10 +183,15 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// </summary>
     public void Clear()
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             _cache.Clear();
             _lruList.Clear();
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
     }
 
