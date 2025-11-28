@@ -1,15 +1,41 @@
+using System.Buffers;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 using Dav.AspNetCore.Server.Http.Headers;
+using Dav.AspNetCore.Server.Performance;
 using Microsoft.AspNetCore.Http;
+using Microsoft.IO;
 
 namespace Dav.AspNetCore.Server;
 
 internal static class HttpContextExtensions
 {
-    private static readonly UTF8Encoding Utf8Encoding = new(false);  
-    
+    private static readonly UTF8Encoding Utf8Encoding = new(false);
+
+    // Shared recyclable memory stream manager for reduced allocations
+    private static readonly RecyclableMemoryStreamManager MemoryStreamManager = new(
+        new RecyclableMemoryStreamManager.Options
+        {
+            BlockSize = 1024,
+            LargeBufferMultiple = 1024 * 1024,
+            MaximumBufferSize = 16 * 1024 * 1024,
+            GenerateCallStacks = false,
+            AggressiveBufferReturn = true,
+            MaximumLargePoolFreeBytes = 16 * 1024 * 1024,
+            MaximumSmallPoolFreeBytes = 100 * 1024
+        });
+
+    // Shared XmlWriterSettings instance
+    private static readonly XmlWriterSettings SharedXmlWriterSettings = new()
+    {
+        Encoding = Utf8Encoding,
+        Indent = false,
+        OmitXmlDeclaration = false,
+        NamespaceHandling = NamespaceHandling.OmitDuplicates,
+        Async = true
+    };
+
     public static void SetResult(
         this HttpContext context,
         DavStatusCode statusCode)
@@ -19,28 +45,22 @@ internal static class HttpContextExtensions
     }
 
     public static async Task WriteDocumentAsync(
-        this HttpContext context, 
-        DavStatusCode statusCode, 
-        XDocument document, 
+        this HttpContext context,
+        DavStatusCode statusCode,
+        XDocument document,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context, nameof(context));
         ArgumentNullException.ThrowIfNull(document, nameof(document));
 
-        using var memoryStream = new MemoryStream();
+        // Use recyclable memory stream to reduce allocations
+        await using var memoryStream = MemoryStreamManager.GetStream("WebDavXmlWrite");
 
-        var xmlWriter = XmlWriter.Create(memoryStream, new XmlWriterSettings
+        await using (var xmlWriter = XmlWriter.Create(memoryStream, SharedXmlWriterSettings))
         {
-            Encoding = Utf8Encoding, 
-            Indent = false,
-            OmitXmlDeclaration = false,
-            NamespaceHandling = NamespaceHandling.OmitDuplicates,
-            Async = true
-        });
-        
-        await document.WriteToAsync(xmlWriter, cancellationToken);
-        await xmlWriter.DisposeAsync();
-        
+            await document.WriteToAsync(xmlWriter, cancellationToken).ConfigureAwait(false);
+        }
+
         context.SetResult(statusCode);
 
         context.Response.ContentType = "application/xml; charset=\"utf-8\"";
