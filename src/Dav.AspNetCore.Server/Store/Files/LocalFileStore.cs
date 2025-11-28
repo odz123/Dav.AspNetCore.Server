@@ -167,4 +167,26 @@ public class LocalFileStore : FileStore
             StringBuilderPool.Return(sb);
         }
     }
+
+    /// <summary>
+    /// Gets the physical file path for a given URI.
+    /// Enables zero-copy file transfers using OS-level optimizations (SendFile).
+    /// </summary>
+    /// <param name="uri">The URI of the file.</param>
+    /// <returns>The physical file path, or null if path is invalid or not a file.</returns>
+    public override string? GetPhysicalPath(Uri uri)
+    {
+        try
+        {
+            var path = GetSafePath(uri);
+            if (System.IO.File.Exists(path))
+                return path;
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            // Path traversal detected
+            return null;
+        }
+    }
 }

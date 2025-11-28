@@ -4,6 +4,7 @@ namespace Dav.AspNetCore.Server.Performance;
 
 /// <summary>
 /// Provides fast ETag computation with caching based on file metadata.
+/// Optimized for streaming scenarios with large files.
 /// </summary>
 internal sealed class ETagCache
 {
@@ -15,17 +16,32 @@ internal sealed class ETagCache
     /// </summary>
     public static ETagCache Instance => LazyInstance.Value;
 
+    /// <summary>
+    /// Files larger than this threshold will use fast metadata-based ETags
+    /// instead of content hashing. Default is 10MB.
+    /// This significantly improves performance for streaming large files.
+    /// </summary>
+    public static long FastETagThreshold { get; set; } = 10 * 1024 * 1024;
+
+    /// <summary>
+    /// When true, always uses fast metadata-based ETags regardless of file size.
+    /// Recommended for streaming-heavy workloads.
+    /// </summary>
+    public static bool AlwaysUseFastETag { get; set; }
+
     private sealed class ETagEntry
     {
         public string ETag { get; }
         public long FileSize { get; }
         public DateTime LastModified { get; }
+        public bool IsFastETag { get; }
 
-        public ETagEntry(string etag, long fileSize, DateTime lastModified)
+        public ETagEntry(string etag, long fileSize, DateTime lastModified, bool isFastETag = false)
         {
             ETag = etag;
             FileSize = fileSize;
             LastModified = lastModified;
+            IsFastETag = isFastETag;
         }
     }
 
@@ -41,6 +57,7 @@ internal sealed class ETagCache
     /// <summary>
     /// Gets or computes the ETag for a file based on its URI and metadata.
     /// Uses cached value if file hasn't changed.
+    /// For large files (above FastETagThreshold), uses fast metadata-based ETag.
     /// </summary>
     /// <param name="uri">The file URI (used as cache key).</param>
     /// <param name="fileSize">The current file size.</param>
@@ -56,6 +73,7 @@ internal sealed class ETagCache
         CancellationToken cancellationToken = default)
     {
         var cacheKey = uri.AbsolutePath;
+        var useFastETag = AlwaysUseFastETag || fileSize > FastETagThreshold;
 
         // Check if we have a valid cached entry
         if (_cache.TryGetValue(cacheKey, out var entry))
@@ -65,15 +83,25 @@ internal sealed class ETagCache
                 entry.FileSize == fileSize &&
                 entry.LastModified == lastModified)
             {
+                // If we're now using fast ETag mode and the cached entry isn't fast,
+                // that's OK - the cached content hash is still valid
                 return entry.ETag;
             }
         }
 
-        // Compute new ETag
-        var etag = await ComputeETagAsync(streamFactory, cancellationToken).ConfigureAwait(false);
+        // Compute new ETag - use fast mode for large files
+        string etag;
+        if (useFastETag)
+        {
+            etag = ComputeFastETag(fileSize, lastModified);
+        }
+        else
+        {
+            etag = await ComputeETagAsync(streamFactory, cancellationToken).ConfigureAwait(false);
+        }
 
         // Cache the result
-        _cache.Set(cacheKey, new ETagEntry(etag, fileSize, lastModified));
+        _cache.Set(cacheKey, new ETagEntry(etag, fileSize, lastModified, useFastETag));
 
         return etag;
     }
