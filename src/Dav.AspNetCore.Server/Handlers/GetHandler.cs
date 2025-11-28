@@ -223,6 +223,10 @@ internal class GetHandler : RequestHandler
                 return;
             }
 
+            // OPTIMIZATION: Track seek pattern for this file
+            var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
+            var pattern = SeekPatternTracker.Instance.RecordAccess(filePath, offset, length);
+
             Context.SetResult(DavStatusCode.PartialContent);
             Context.Response.ContentLength = length;
             Context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{contentLength}";
@@ -234,10 +238,10 @@ internal class GetHandler : RequestHandler
             }
             else
             {
-                // Fallback: open stream with RandomAccess hint
-                await using var stream = OptimizedFileStream.OpenForRandomAccess(physicalPath);
+                // Fallback: open stream with pattern-based hint
+                await using var stream = OptimizedFileStream.OpenForRead(physicalPath, pattern);
                 stream.Seek(offset, SeekOrigin.Begin);
-                var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, FileAccessPattern.RandomAccess);
+                var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, pattern);
                 await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
             }
             return;
@@ -311,7 +315,7 @@ internal class GetHandler : RequestHandler
     /// <summary>
     /// Sends range data from a stream (for non-physical files).
     /// </summary>
-    private static async Task SendRangeDataAsync(
+    private async Task SendRangeDataAsync(
         HttpContext context,
         Stream stream,
         CancellationToken cancellationToken)
@@ -327,6 +331,10 @@ internal class GetHandler : RequestHandler
             return;
         }
 
+        // OPTIMIZATION: Track seek pattern for intelligent prefetch decisions
+        var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
+        var pattern = SeekPatternTracker.Instance.RecordAccess(filePath, offset, length);
+
         // Seek to the start position
         stream.Seek(offset, SeekOrigin.Begin);
 
@@ -335,8 +343,11 @@ internal class GetHandler : RequestHandler
         context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{streamLength}";
         context.Response.Headers["Accept-Ranges"] = "bytes";
 
-        // Use optimal buffer size for range requests (smaller for random access)
-        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, FileAccessPattern.RandomAccess);
+        // OPTIMIZATION: Flush headers immediately for fast seek response
+        await context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // Use buffer size based on detected access pattern
+        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, pattern);
         await stream.CopyToPooledAsync(context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
     }
 
@@ -363,9 +374,22 @@ internal class GetHandler : RequestHandler
 
         AddStreamingHeaders(context, context.Response.ContentType, contentLength);
 
+        // OPTIMIZATION: Flush headers immediately to reduce TTFB
+        // This allows the client to start processing headers while we read the file
+        await context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
         // Use optimal buffer size for sequential reads
         var bufferSize = OptimizedFileStream.GetOptimalBufferSize(contentLength, FileAccessPattern.Sequential);
-        await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+
+        // OPTIMIZATION: Use pipelined copy for large files to overlap read and write operations
+        if (contentLength > BufferPool.StreamingThreshold)
+        {
+            await stream.CopyToPooledPipelinedAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
