@@ -7,7 +7,7 @@ namespace Dav.AspNetCore.Server.Performance;
 /// Uses posix_fadvise and madvise to inform the kernel about expected access patterns,
 /// significantly improving prefetching and cache utilization for streaming workloads.
 /// </summary>
-internal static partial class LinuxKernelHints
+internal static class LinuxKernelHints
 {
     // posix_fadvise advice flags
     private const int POSIX_FADV_NORMAL = 0;
@@ -237,9 +237,9 @@ internal static partial class LinuxKernelHints
     /// </summary>
     public static bool IsAvailable => IsLinux;
 
-    // P/Invoke for posix_fadvise
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int posix_fadvise(int fd, long offset, long len, int advice);
+    // P/Invoke for posix_fadvise using traditional DllImport
+    [DllImport("libc", EntryPoint = "posix_fadvise", SetLastError = true)]
+    private static extern int posix_fadvise(int fd, long offset, long len, int advice);
 
     private static void PosixFadvise(int fd, long offset, long length, int advice)
     {

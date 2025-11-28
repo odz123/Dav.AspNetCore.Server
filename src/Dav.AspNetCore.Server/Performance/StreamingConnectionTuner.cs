@@ -1,14 +1,13 @@
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace Dav.AspNetCore.Server.Performance;
 
 /// <summary>
-/// Tunes socket-level settings for optimal streaming performance.
-/// Applies TCP_NODELAY, socket buffer tuning, and other optimizations.
+/// Tunes connection settings for optimal streaming performance.
+/// Applies response buffering optimizations and socket tuning when available.
 /// </summary>
 internal static class StreamingConnectionTuner
 {
@@ -49,21 +48,51 @@ internal static class StreamingConnectionTuner
     {
         try
         {
-            var connectionFeature = context.Features.Get<IConnectionSocketFeature>();
-            var socket = connectionFeature?.Socket;
+            // Primary optimization: Disable response buffering for streaming
+            // This is the most impactful optimization and always available
+            var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
+            bufferingFeature?.DisableBuffering();
 
+            // Try to get socket from connection info if available
+            var socket = TryGetSocket(context);
             if (socket != null)
             {
                 TuneSocket(socket, contentLength, isInitialRange);
             }
-
-            // Disable response buffering for streaming
-            var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
-            bufferingFeature?.DisableBuffering();
         }
         catch
         {
             // Non-critical - tuning failure doesn't affect functionality
+        }
+    }
+
+    /// <summary>
+    /// Attempts to get the underlying socket from the HTTP context.
+    /// </summary>
+    private static Socket? TryGetSocket(HttpContext context)
+    {
+        try
+        {
+            // Try to get socket through connection features
+            // This may not be available depending on the server configuration
+            var connectionInfo = context.Connection;
+            if (connectionInfo == null)
+                return null;
+
+            // Access the underlying socket through reflection if available
+            // This is a best-effort approach
+            var connectionType = connectionInfo.GetType();
+            var socketProperty = connectionType.GetProperty("Socket");
+            if (socketProperty != null)
+            {
+                return socketProperty.GetValue(connectionInfo) as Socket;
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -176,19 +205,17 @@ internal static class StreamingConnectionTuner
     {
         try
         {
-            // Increase send buffer for large transfers
-            var connectionFeature = context.Features.Get<IConnectionSocketFeature>();
-            var socket = connectionFeature?.Socket;
+            // Disable buffering
+            var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
+            bufferingFeature?.DisableBuffering();
 
+            // Try to tune socket
+            var socket = TryGetSocket(context);
             if (socket != null)
             {
                 socket.SendBufferSize = StreamingSendBufferSize;
                 socket.NoDelay = true;
             }
-
-            // Disable buffering
-            var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
-            bufferingFeature?.DisableBuffering();
         }
         catch
         {
@@ -203,9 +230,12 @@ internal static class StreamingConnectionTuner
     {
         try
         {
-            var connectionFeature = context.Features.Get<IConnectionSocketFeature>();
-            var socket = connectionFeature?.Socket;
+            // Disable buffering
+            var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
+            bufferingFeature?.DisableBuffering();
 
+            // Try to tune socket
+            var socket = TryGetSocket(context);
             if (socket != null)
             {
                 // Small buffer + no delay = fastest first byte
@@ -217,9 +247,6 @@ internal static class StreamingConnectionTuner
                     SetSocketOption(socket, SOL_TCP, TCP_QUICKACK, 1);
                 }
             }
-
-            var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
-            bufferingFeature?.DisableBuffering();
         }
         catch
         {
