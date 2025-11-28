@@ -5,11 +5,13 @@ using Dav.AspNetCore.Server.Store.Properties;
 
 namespace Dav.AspNetCore.Server.Store.Files;
 
-public class File : IStoreItem
+public class File : IStoreItem, IPhysicalFileInfo
 {
     private readonly FileStore store;
     private readonly FileProperties properties;
-    
+    private string? _physicalPathCached;
+    private bool _physicalPathResolved;
+
     /// <summary>
     /// Initializes a new <see cref="File"/> class.
     /// </summary>
@@ -30,6 +32,28 @@ public class File : IStoreItem
     /// Gets the uri.
     /// </summary>
     public Uri Uri => properties.Uri;
+
+    /// <summary>
+    /// Gets the physical file path, if available.
+    /// Used for zero-copy file transfers (SendFile optimization).
+    /// </summary>
+    public string PhysicalPath
+    {
+        get
+        {
+            if (!_physicalPathResolved)
+            {
+                _physicalPathCached = store.GetPhysicalPath(properties.Uri);
+                _physicalPathResolved = true;
+            }
+            return _physicalPathCached ?? string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether this file has a physical path for SendFile optimization.
+    /// </summary>
+    public bool HasPhysicalPath => !string.IsNullOrEmpty(PhysicalPath);
 
     /// <summary>
     /// Gets a readable stream async.

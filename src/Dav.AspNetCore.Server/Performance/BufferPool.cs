@@ -4,6 +4,7 @@ namespace Dav.AspNetCore.Server.Performance;
 
 /// <summary>
 /// Provides pooled buffer operations for high-performance I/O.
+/// Optimized for WebDAV streaming scenarios.
 /// </summary>
 internal static class BufferPool
 {
@@ -16,6 +17,37 @@ internal static class BufferPool
     /// Large buffer size for bulk operations (256KB).
     /// </summary>
     public const int LargeBufferSize = 256 * 1024;
+
+    /// <summary>
+    /// Streaming buffer size for large file transfers (1MB).
+    /// Optimized for high-throughput streaming scenarios.
+    /// </summary>
+    public const int StreamingBufferSize = 1024 * 1024;
+
+    /// <summary>
+    /// Threshold above which streaming buffer size is used (50MB).
+    /// </summary>
+    public const long StreamingThreshold = 50 * 1024 * 1024;
+
+    /// <summary>
+    /// Gets the optimal buffer size for a given content length.
+    /// Uses larger buffers for streaming large files.
+    /// </summary>
+    /// <param name="contentLength">The content length, or -1 if unknown.</param>
+    /// <returns>The recommended buffer size.</returns>
+    public static int GetOptimalBufferSize(long contentLength)
+    {
+        if (contentLength < 0)
+            return DefaultBufferSize;
+
+        if (contentLength >= StreamingThreshold)
+            return StreamingBufferSize;
+
+        if (contentLength >= 1024 * 1024) // 1MB
+            return LargeBufferSize;
+
+        return DefaultBufferSize;
+    }
 
     /// <summary>
     /// Rents a buffer from the shared array pool.

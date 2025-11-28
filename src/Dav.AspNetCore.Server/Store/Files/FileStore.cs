@@ -132,6 +132,15 @@ public abstract class FileStore : IStore
     public abstract ValueTask CreateDirectoryAsync(Uri uri, CancellationToken cancellationToken);
 
     public abstract ValueTask<Uri[]> GetFilesAsync(Uri uri, CancellationToken cancellationToken);
-    
+
     public abstract ValueTask<Uri[]> GetDirectoriesAsync(Uri uri, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets the physical file path for a given URI, if available.
+    /// Returns null if the store doesn't support physical file access.
+    /// When available, enables zero-copy file transfers using OS-level optimizations.
+    /// </summary>
+    /// <param name="uri">The URI of the file.</param>
+    /// <returns>The physical file path, or null if not available.</returns>
+    public virtual string? GetPhysicalPath(Uri uri) => null;
 }

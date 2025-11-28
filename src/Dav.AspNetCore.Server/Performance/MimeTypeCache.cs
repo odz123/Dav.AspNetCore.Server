@@ -5,12 +5,53 @@ namespace Dav.AspNetCore.Server.Performance;
 
 /// <summary>
 /// Provides cached MIME type lookups using a singleton provider.
+/// Includes optimized support for streaming-friendly file types.
 /// </summary>
 internal static class MimeTypeCache
 {
-    private static readonly FileExtensionContentTypeProvider Provider = new();
+    private static readonly FileExtensionContentTypeProvider Provider;
     private static readonly ConcurrentDictionary<string, string> ExtensionCache = new(StringComparer.OrdinalIgnoreCase);
     private const string DefaultMimeType = "application/octet-stream";
+
+    /// <summary>
+    /// Custom MIME type mappings for streaming-friendly file types.
+    /// </summary>
+    private static readonly Dictionary<string, string> CustomMappings = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // NZB and Usenet-related
+        { ".nzb", "application/x-nzb" },
+
+        // Video streaming formats
+        { ".mkv", "video/x-matroska" },
+        { ".webm", "video/webm" },
+        { ".m3u8", "application/vnd.apple.mpegurl" },
+        { ".ts", "video/mp2t" },
+        { ".m4s", "video/iso.segment" },
+
+        // Subtitle formats
+        { ".srt", "application/x-subrip" },
+        { ".vtt", "text/vtt" },
+        { ".ass", "text/x-ssa" },
+        { ".ssa", "text/x-ssa" },
+
+        // Archive formats commonly used with NZB
+        { ".rar", "application/vnd.rar" },
+        { ".r00", "application/vnd.rar" },
+        { ".par2", "application/x-par2" },
+        { ".sfv", "text/x-sfv" },
+        { ".nfo", "text/x-nfo" }
+    };
+
+    static MimeTypeCache()
+    {
+        Provider = new FileExtensionContentTypeProvider();
+
+        // Add custom mappings to the provider
+        foreach (var mapping in CustomMappings)
+        {
+            Provider.Mappings[mapping.Key] = mapping.Value;
+        }
+    }
 
     /// <summary>
     /// Gets the MIME type for a file path or URI, using cached lookups.
