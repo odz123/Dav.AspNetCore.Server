@@ -4,8 +4,9 @@ using Dav.AspNetCore.Server.Store;
 
 namespace Dav.AspNetCore.Server.Locks;
 
-public sealed class InMemoryLockManager : ILockManager
+public sealed class InMemoryLockManager : ILockManager, IDisposable
 {
+    private bool _disposed;
     // Main lock storage by lock ID
     private readonly ConcurrentDictionary<Uri, ResourceLock> _locksById = new();
 
@@ -292,4 +293,16 @@ public sealed class InMemoryLockManager : ILockManager
         IStoreItem item,
         CancellationToken cancellationToken = default)
         => SupportedLocksTask;
+
+    /// <summary>
+    /// Disposes the lock manager and releases associated resources.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _cleanupTimer?.Dispose();
+    }
 }

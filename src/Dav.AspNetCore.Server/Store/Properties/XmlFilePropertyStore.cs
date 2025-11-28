@@ -196,11 +196,11 @@ public class XmlFilePropertyStore : IPropertyStore
             return Array.Empty<PropertyData>();
         }
 
-        var fileStream = File.OpenRead(xmlFilePath);
         var propertyDataList = new List<PropertyData>();
-        
+
         try
         {
+            await using var fileStream = File.OpenRead(xmlFilePath);
             var document = await XDocument.LoadAsync(fileStream, LoadOptions.None, cancellationToken);
             var propertyStore = document.Element(PropertyStore);
             var properties = propertyStore?.Elements(Property)
@@ -228,7 +228,7 @@ public class XmlFilePropertyStore : IPropertyStore
                 var propertyData = new PropertyData(
                     property.Name,
                     propertyValue);
-                
+
                 propertyDataList.Add(propertyData);
             }
         }
@@ -236,10 +236,6 @@ public class XmlFilePropertyStore : IPropertyStore
         {
             propertyCache[item] = new ConcurrentDictionary<XName, PropertyData>();
             return propertyDataList;
-        }
-        finally
-        {
-            await fileStream.DisposeAsync();
         }
 
         var newCache = new ConcurrentDictionary<XName, PropertyData>();
