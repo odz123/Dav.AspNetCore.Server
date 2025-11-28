@@ -118,4 +118,104 @@ internal static class BufferPool
             Return(buffer);
         }
     }
+
+    /// <summary>
+    /// Copies data from source to destination with pipelined reads for better throughput.
+    /// Uses double-buffering to overlap read and write operations.
+    /// </summary>
+    public static async Task CopyToPooledPipelinedAsync(
+        this Stream source,
+        Stream destination,
+        int bufferSize = DefaultBufferSize,
+        CancellationToken cancellationToken = default)
+    {
+        // Double-buffer for pipelining
+        var buffer1 = Rent(bufferSize);
+        var buffer2 = Rent(bufferSize);
+        try
+        {
+            // Start first read
+            var currentBuffer = buffer1;
+            var nextBuffer = buffer2;
+            var readTask = source.ReadAsync(currentBuffer.AsMemory(0, bufferSize), cancellationToken);
+
+            while (true)
+            {
+                var bytesRead = await readTask.ConfigureAwait(false);
+                if (bytesRead == 0)
+                    break;
+
+                // Start next read while we write current buffer
+                readTask = source.ReadAsync(nextBuffer.AsMemory(0, bufferSize), cancellationToken);
+
+                // Write current buffer
+                await destination.WriteAsync(currentBuffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+
+                // Swap buffers
+                (currentBuffer, nextBuffer) = (nextBuffer, currentBuffer);
+            }
+        }
+        finally
+        {
+            Return(buffer1);
+            Return(buffer2);
+        }
+    }
+
+    /// <summary>
+    /// Copies a specific number of bytes with pipelined reads for better throughput.
+    /// </summary>
+    public static async Task CopyToPooledPipelinedAsync(
+        this Stream source,
+        Stream destination,
+        long bytesToCopy,
+        int bufferSize = DefaultBufferSize,
+        CancellationToken cancellationToken = default)
+    {
+        if (bytesToCopy <= bufferSize)
+        {
+            // For small copies, use simple method
+            await source.CopyToPooledAsync(destination, bytesToCopy, bufferSize, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var buffer1 = Rent(bufferSize);
+        var buffer2 = Rent(bufferSize);
+        try
+        {
+            var currentBuffer = buffer1;
+            var nextBuffer = buffer2;
+            var remaining = bytesToCopy;
+
+            var readSize = (int)Math.Min(remaining, bufferSize);
+            var readTask = source.ReadAsync(currentBuffer.AsMemory(0, readSize), cancellationToken);
+
+            while (remaining > 0)
+            {
+                var bytesRead = await readTask.ConfigureAwait(false);
+                if (bytesRead == 0)
+                    break;
+
+                remaining -= bytesRead;
+
+                // Start next read if there's more data
+                if (remaining > 0)
+                {
+                    var nextReadSize = (int)Math.Min(remaining, bufferSize);
+                    readTask = source.ReadAsync(nextBuffer.AsMemory(0, nextReadSize), cancellationToken);
+                }
+
+                // Write current buffer
+                await destination.WriteAsync(currentBuffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+
+                // Swap buffers
+                (currentBuffer, nextBuffer) = (nextBuffer, currentBuffer);
+            }
+        }
+        finally
+        {
+            Return(buffer1);
+            Return(buffer2);
+        }
+    }
 }

@@ -19,12 +19,15 @@ public static class WebDavServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services, nameof(services));
         ArgumentNullException.ThrowIfNull(webDavBuilder, nameof(webDavBuilder));
-        
+
         var builder = new WebDavOptionsBuilder(services);
         webDavBuilder(builder);
-        
+
+        // Apply streaming optimizations if configured
+        builder.ApplyStreamingOptions();
+
         services.AddHttpContextAccessor();
-        
+
         services.TryAddSingleton<WebDavOptions>(builder);
         services.TryAddScoped<IPropertyManager, PropertyManager>();
         services.TryAddSingleton<ILockManager>(new InMemoryLockManager(Array.Empty<ResourceLock>()));
