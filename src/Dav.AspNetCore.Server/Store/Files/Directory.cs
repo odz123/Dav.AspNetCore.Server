@@ -107,7 +107,7 @@ public class Directory : IStoreCollection
     {
         var cacheKey = Uri.AbsolutePath;
 
-        if (!store.DisableCaching && store.CollectionCache.TryGetValue(cacheKey, out var cacheItems))
+        if (!store.DisableCaching && store.CollectionCache.TryGetValue(cacheKey, out var cacheItems) && cacheItems != null)
             return cacheItems.AsReadOnly();
 
         var items = new List<IStoreItem>();
