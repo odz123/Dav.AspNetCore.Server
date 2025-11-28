@@ -3,8 +3,8 @@ using System.Collections.Concurrent;
 namespace Dav.AspNetCore.Server.Performance;
 
 /// <summary>
-/// Tracks seek patterns per file to optimize I/O hints.
-/// Detects sequential reads, random access, and forward-seeking patterns.
+/// Tracks seek patterns per file to optimize I/O hints and predict prefetch targets.
+/// Detects sequential reads, random access, forward-seeking, and video scrubbing patterns.
 /// </summary>
 internal sealed class SeekPatternTracker
 {
@@ -30,6 +30,16 @@ internal sealed class SeekPatternTracker
     /// Time window for tracking (older entries expire).
     /// </summary>
     private static readonly TimeSpan ExpirationTime = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Default prefetch size for video scrubbing patterns (2MB).
+    /// </summary>
+    public const long DefaultPrefetchSize = 2 * 1024 * 1024;
+
+    /// <summary>
+    /// Maximum prefetch size (8MB).
+    /// </summary>
+    public const long MaxPrefetchSize = 8 * 1024 * 1024;
 
     private readonly LruCache<string, FileAccessTracker> _trackers;
 
@@ -66,6 +76,34 @@ internal sealed class SeekPatternTracker
     }
 
     /// <summary>
+    /// Gets a prefetch hint for the likely next range request.
+    /// Returns null if no prediction can be made.
+    /// </summary>
+    /// <param name="filePath">The file path.</param>
+    /// <param name="fileSize">The total file size.</param>
+    /// <returns>A prefetch hint with predicted offset and length, or null.</returns>
+    public PrefetchHint? GetPrefetchHint(string filePath, long fileSize)
+    {
+        if (_trackers.TryGetValue(filePath, out var tracker) && tracker != null)
+        {
+            return tracker.GetPrefetchHint(fileSize);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Records access and returns both the pattern and a prefetch hint.
+    /// </summary>
+    public (FileAccessPattern Pattern, PrefetchHint? Prefetch) RecordAccessWithPrefetch(
+        string filePath, long offset, long length, long fileSize)
+    {
+        var tracker = _trackers.GetOrAdd(filePath, _ => new FileAccessTracker());
+        var pattern = tracker.RecordAccess(offset, length);
+        var prefetch = tracker.GetPrefetchHint(fileSize);
+        return (pattern, prefetch);
+    }
+
+    /// <summary>
     /// Invalidates tracking data for a file (e.g., when file is modified).
     /// </summary>
     public void Invalidate(string filePath)
@@ -92,6 +130,11 @@ internal sealed class SeekPatternTracker
         private int _sequentialCount;
         private int _randomCount;
         private int _forwardSeekCount;
+
+        // For prefetch prediction
+        private long _avgSeekDistance;
+        private long _avgRequestSize;
+        private int _seekSamples;
         private readonly object _lock = new();
 
         public FileAccessPattern PredictedPattern
@@ -127,6 +170,9 @@ internal sealed class SeekPatternTracker
                     _sequentialCount = 0;
                     _randomCount = 0;
                     _forwardSeekCount = 0;
+                    _avgSeekDistance = 0;
+                    _avgRequestSize = 0;
+                    _seekSamples = 0;
                 }
 
                 // Analyze the access pattern
@@ -134,6 +180,23 @@ internal sealed class SeekPatternTracker
                 {
                     var expectedNextOffset = _lastOffset + _lastLength;
                     var seekDistance = offset - expectedNextOffset;
+
+                    // Update moving average of seek distance (for forward seeks)
+                    if (seekDistance > 0 && seekDistance <= ForwardSeekThreshold)
+                    {
+                        _seekSamples++;
+                        // Exponential moving average for responsiveness
+                        if (_seekSamples == 1)
+                        {
+                            _avgSeekDistance = seekDistance;
+                            _avgRequestSize = length;
+                        }
+                        else
+                        {
+                            _avgSeekDistance = (_avgSeekDistance * 3 + seekDistance) / 4;
+                            _avgRequestSize = (_avgRequestSize * 3 + length) / 4;
+                        }
+                    }
 
                     if (Math.Abs(seekDistance) < 4096) // Within a page
                     {
@@ -151,6 +214,11 @@ internal sealed class SeekPatternTracker
                         _randomCount++;
                     }
                 }
+                else
+                {
+                    // First access - initialize average request size
+                    _avgRequestSize = length;
+                }
 
                 _lastOffset = offset;
                 _lastLength = length;
@@ -159,5 +227,70 @@ internal sealed class SeekPatternTracker
                 return PredictedPattern;
             }
         }
+
+        /// <summary>
+        /// Gets a prefetch hint based on observed patterns.
+        /// </summary>
+        public PrefetchHint? GetPrefetchHint(long fileSize)
+        {
+            lock (_lock)
+            {
+                // Need enough samples to make predictions
+                if (_seekSamples < 2)
+                    return null;
+
+                // Only prefetch for forward-seeking patterns (video scrubbing)
+                if (_forwardSeekCount <= _sequentialCount && _forwardSeekCount <= _randomCount)
+                    return null;
+
+                // Predict next offset based on pattern
+                var predictedNextOffset = _lastOffset + _lastLength + _avgSeekDistance;
+
+                // Don't prefetch past end of file
+                if (predictedNextOffset >= fileSize)
+                    return null;
+
+                // Prefetch a larger chunk than the average request (read-ahead)
+                var prefetchSize = Math.Min(
+                    Math.Max(_avgRequestSize * 2, DefaultPrefetchSize),
+                    MaxPrefetchSize);
+
+                // Adjust to not exceed file size
+                prefetchSize = Math.Min(prefetchSize, fileSize - predictedNextOffset);
+
+                if (prefetchSize <= 0)
+                    return null;
+
+                return new PrefetchHint(predictedNextOffset, prefetchSize, _seekSamples);
+            }
+        }
+    }
+}
+
+/// <summary>
+/// Represents a hint for prefetching data based on access pattern prediction.
+/// </summary>
+public readonly struct PrefetchHint
+{
+    /// <summary>
+    /// The predicted offset for the next request.
+    /// </summary>
+    public long PredictedOffset { get; }
+
+    /// <summary>
+    /// The recommended prefetch size.
+    /// </summary>
+    public long PrefetchSize { get; }
+
+    /// <summary>
+    /// Confidence level (number of samples used for prediction).
+    /// </summary>
+    public int Confidence { get; }
+
+    public PrefetchHint(long predictedOffset, long prefetchSize, int confidence)
+    {
+        PredictedOffset = predictedOffset;
+        PrefetchSize = prefetchSize;
+        Confidence = confidence;
     }
 }

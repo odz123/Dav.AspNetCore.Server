@@ -53,6 +53,18 @@ public class WebDavOptionsBuilder : WebDavOptions
     }
 
     /// <summary>
+    /// Configures the server for ultra-low latency NZB streaming.
+    /// Combines all optimizations for the absolute fastest stream starts and seeks.
+    /// Enables memory-mapped files, predictive prefetching, and metadata caching.
+    /// </summary>
+    /// <returns>The options builder for chaining.</returns>
+    public WebDavOptionsBuilder UseUltraLowLatencyNzb()
+    {
+        Streaming = StreamingOptions.ForUltraLowLatencyNzb();
+        return this;
+    }
+
+    /// <summary>
     /// Configures custom streaming options.
     /// </summary>
     /// <param name="configure">Action to configure streaming options.</param>

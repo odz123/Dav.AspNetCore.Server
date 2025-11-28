@@ -213,4 +213,10 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// Checks if the cache contains the specified key.
     /// </summary>
     public bool ContainsKey(TKey key) => _cache.ContainsKey(key);
+
+    /// <summary>
+    /// Gets all keys currently in the cache.
+    /// Note: This is a snapshot and may not reflect concurrent modifications.
+    /// </summary>
+    public IEnumerable<TKey> Keys => _cache.Keys;
 }

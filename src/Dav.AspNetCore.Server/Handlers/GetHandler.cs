@@ -115,14 +115,10 @@ internal class GetHandler : RequestHandler
     /// </summary>
     private Task HandleHeadRequestAsync(long contentLength, bool supportsRanges)
     {
-        if (supportsRanges)
-        {
-            Context.Response.Headers["Accept-Ranges"] = "bytes";
-        }
-        else
-        {
-            Context.Response.Headers["Accept-Ranges"] = "none";
-        }
+        // Use pre-computed header values for faster response
+        Context.Response.Headers["Accept-Ranges"] = supportsRanges
+            ? ResponseHeaderCache.AcceptRangesBytes
+            : ResponseHeaderCache.AcceptRangesNone;
 
         if (contentLength >= 0)
         {
@@ -207,7 +203,7 @@ internal class GetHandler : RequestHandler
         var requestHeaders = Context.Request.GetTypedHeaders();
         var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
 
-        Context.Response.Headers["Accept-Ranges"] = "bytes";
+        Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
         AddStreamingHeaders(Context, Context.Response.ContentType, contentLength);
 
         // Handle range requests using SendFile with offset/length
@@ -223,13 +219,42 @@ internal class GetHandler : RequestHandler
                 return;
             }
 
-            // OPTIMIZATION: Track seek pattern for this file
+            // OPTIMIZATION: Track seek pattern and get prefetch hints
             var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
-            var pattern = SeekPatternTracker.Instance.RecordAccess(filePath, offset, length);
+            var (pattern, prefetchHint) = SeekPatternTracker.Instance.RecordAccessWithPrefetch(
+                filePath, offset, length, contentLength);
+
+            // Queue background prefetch for predicted next request
+            if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3)
+            {
+                PrefetchService.Instance.QueuePrefetch(physicalPath, prefetchHint.Value);
+            }
 
             Context.SetResult(DavStatusCode.PartialContent);
             Context.Response.ContentLength = length;
-            Context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{contentLength}";
+            Context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, contentLength);
+
+            // OPTIMIZATION: Flush headers immediately to reduce seek response latency
+            await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
+            // OPTIMIZATION: Try memory-mapped file for random access patterns (fastest seeking)
+            if (pattern == FileAccessPattern.RandomAccess &&
+                MemoryMappedFilePool.ShouldUseMemoryMapping(contentLength, pattern))
+            {
+                var lastModified = System.IO.File.GetLastWriteTimeUtc(physicalPath);
+                var mappedStream = MemoryMappedFilePool.Instance.GetMappedRangeStream(
+                    physicalPath, contentLength, lastModified, offset, length);
+
+                if (mappedStream != null)
+                {
+                    await using (mappedStream)
+                    {
+                        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, pattern);
+                        await mappedStream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+                    }
+                    return;
+                }
+            }
 
             if (responseBodyFeature != null)
             {
@@ -331,17 +356,26 @@ internal class GetHandler : RequestHandler
             return;
         }
 
-        // OPTIMIZATION: Track seek pattern for intelligent prefetch decisions
+        // OPTIMIZATION: Track seek pattern and get prefetch hints
         var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
-        var pattern = SeekPatternTracker.Instance.RecordAccess(filePath, offset, length);
+        var (pattern, prefetchHint) = SeekPatternTracker.Instance.RecordAccessWithPrefetch(
+            filePath, offset, length, streamLength);
+
+        // Queue background prefetch for predicted next request (if physical path available)
+        var physicalFile = Item as IPhysicalFileInfo;
+        if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3 &&
+            !string.IsNullOrEmpty(physicalFile?.PhysicalPath))
+        {
+            PrefetchService.Instance.QueuePrefetch(physicalFile.PhysicalPath, prefetchHint.Value);
+        }
 
         // Seek to the start position
         stream.Seek(offset, SeekOrigin.Begin);
 
         context.SetResult(DavStatusCode.PartialContent);
         context.Response.ContentLength = length;
-        context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{streamLength}";
-        context.Response.Headers["Accept-Ranges"] = "bytes";
+        context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, streamLength);
+        context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
 
         // OPTIMIZATION: Flush headers immediately for fast seek response
         await context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -364,12 +398,12 @@ internal class GetHandler : RequestHandler
 
         if (stream.CanSeek)
         {
-            context.Response.Headers["Accept-Ranges"] = "bytes";
+            context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
             context.Response.ContentLength = stream.Length;
         }
         else
         {
-            context.Response.Headers["Accept-Ranges"] = "none";
+            context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesNone;
         }
 
         AddStreamingHeaders(context, context.Response.ContentType, contentLength);
@@ -452,15 +486,15 @@ internal class GetHandler : RequestHandler
     }
 
     /// <summary>
-    /// Adds streaming-optimized headers to the response.
+    /// Adds streaming-optimized headers to the response using pre-computed values.
     /// </summary>
     private static void AddStreamingHeaders(HttpContext context, string? contentType, long contentLength)
     {
         // Allow clients to cache streamable content
         if (IsStreamableContent(contentType))
         {
-            // Private cache for 1 hour, must revalidate for changes
-            context.Response.Headers["Cache-Control"] = "private, max-age=3600, must-revalidate";
+            // Use pre-computed header value
+            context.Response.Headers["Cache-Control"] = ResponseHeaderCache.CacheControlStreaming;
         }
 
         // Disable response buffering for streaming - critical for fast TTFB
@@ -470,8 +504,8 @@ internal class GetHandler : RequestHandler
         // For large files, hint that the connection should be kept alive
         if (contentLength > BufferPool.StreamingThreshold)
         {
-            context.Response.Headers["Connection"] = "keep-alive";
-            context.Response.Headers["Keep-Alive"] = "timeout=120";
+            context.Response.Headers["Connection"] = ResponseHeaderCache.ConnectionKeepAlive;
+            context.Response.Headers["Keep-Alive"] = ResponseHeaderCache.GetKeepAliveHeader(120);
         }
     }
 
