@@ -1,9 +1,7 @@
-using System.Buffers;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 using Dav.AspNetCore.Server.Http.Headers;
-using Dav.AspNetCore.Server.Performance;
 using Microsoft.AspNetCore.Http;
 using Microsoft.IO;
 
