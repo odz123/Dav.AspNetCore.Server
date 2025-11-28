@@ -52,6 +52,9 @@ download_package() {
 echo "=== Downloading NuGet packages ==="
 echo ""
 
+# Download main project dependency
+download_package "Microsoft.IO.RecyclableMemoryStream" "3.0.1"
+
 # Download required packages for tests
 download_package "Microsoft.NET.Test.Sdk" "17.12.0"
 download_package "Moq" "4.20.72"
@@ -76,6 +79,14 @@ download_package "Microsoft.TestPlatform.TestHost" "17.12.0"
 download_package "Microsoft.TestPlatform.ObjectModel" "17.12.0"
 download_package "Microsoft.CodeCoverage" "17.12.0"
 download_package "NuGet.Frameworks" "6.12.1"
+
+# Additional transitive dependencies
+download_package "Newtonsoft.Json" "13.0.3"
+download_package "System.Reflection.Metadata" "9.0.0"
+download_package "System.Collections.Immutable" "9.0.0"
+
+# xunit.runner.visualstudio dependencies
+download_package "xunit.runner.utility" "2.8.2"
 
 echo ""
 echo "=== Download complete ==="

@@ -1,5 +1,6 @@
 using System.Xml.Linq;
 using Dav.AspNetCore.Server.Http;
+using Dav.AspNetCore.Server.Performance;
 using Dav.AspNetCore.Server.Store;
 using Microsoft.AspNetCore.Http;
 
@@ -169,22 +170,14 @@ internal class GetHandler : RequestHandler
             context.Response.ContentLength = bytesToRead;
             context.Response.Headers["Content-Range"] = $"bytes {rangeStart}-{rangeEnd}/{stream.Length}";
 
-            while (bytesToRead > 0)
-            {
-                var buffer = new byte[Math.Min(bytesToRead, 1024 * 64)];
-                var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
-                if (bytesRead == 0)
-                    break; // End of stream reached unexpectedly
-
-                await context.Response.Body.WriteAsync(buffer, 0, bytesRead, cancellationToken);
-
-                bytesToRead -= bytesRead;
-            }
+            // Use pooled buffer for range requests
+            await stream.CopyToPooledAsync(context.Response.Body, bytesToRead, BufferPool.DefaultBufferSize, cancellationToken).ConfigureAwait(false);
 
             return;
         }
-        
+
         context.SetResult(DavStatusCode.Ok);
-        await stream.CopyToAsync(context.Response.Body, cancellationToken);
+        // Use pooled buffer for full file transfers
+        await stream.CopyToPooledAsync(context.Response.Body, BufferPool.DefaultBufferSize, cancellationToken).ConfigureAwait(false);
     }
 }

@@ -1,8 +1,7 @@
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Xml;
+using Dav.AspNetCore.Server.Performance;
 using Dav.AspNetCore.Server.Store.Properties;
-using Microsoft.AspNetCore.StaticFiles;
 
 namespace Dav.AspNetCore.Server.Store.Files;
 
@@ -51,7 +50,12 @@ public class File : IStoreItem
         ArgumentNullException.ThrowIfNull(stream, nameof(stream));
 
         await using var fileStream = await store.OpenFileStreamAsync(properties.Uri, OpenFileMode.Write, cancellationToken);
-        await stream.CopyToAsync(fileStream, cancellationToken).ConfigureAwait(false);
+
+        // Use pooled buffer for copying
+        await stream.CopyToPooledAsync(fileStream, BufferPool.LargeBufferSize, cancellationToken).ConfigureAwait(false);
+
+        // Invalidate ETag cache since file was modified
+        ETagCache.Instance.Invalidate(properties.Uri);
 
         return DavStatusCode.Ok;
     }
@@ -82,43 +86,40 @@ public class File : IStoreItem
                 return ItemResult.Fail(DavStatusCode.PreconditionFailed);
         }
 
-        var result = await destination.CreateItemAsync(name, cancellationToken);
+        var result = await destination.CreateItemAsync(name, cancellationToken).ConfigureAwait(false);
         if (result.Item == null)
             return ItemResult.Fail(result.StatusCode);
-        
-        await using var readableStream = await GetReadableStreamAsync(cancellationToken);
-        statusCode = await result.Item.WriteDataAsync(readableStream, cancellationToken);
+
+        await using var readableStream = await GetReadableStreamAsync(cancellationToken).ConfigureAwait(false);
+        statusCode = await result.Item.WriteDataAsync(readableStream, cancellationToken).ConfigureAwait(false);
         if (statusCode != DavStatusCode.Ok)
             return ItemResult.Fail(statusCode);
 
-        store.ItemCache[result.Item.Uri] = result.Item;
-        
-        return item != null 
-            ? ItemResult.NoContent(result.Item) 
+        if (!store.DisableCaching)
+            store.ItemCache.Set(result.Item.Uri.AbsolutePath, result.Item);
+
+        return item != null
+            ? ItemResult.NoContent(result.Item)
             : ItemResult.Created(result.Item);
     }
     
     private static string GetMimeTypeForFileExtension(Uri uri)
     {
-        var provider = new FileExtensionContentTypeProvider();
-        if (!provider.TryGetContentType(uri.AbsolutePath, out var contentType))
-        {
-            contentType = "application/octet-stream";
-        }
-
-        return contentType;
+        // Use cached MIME type lookup for better performance
+        return MimeTypeCache.GetMimeType(uri);
     }
-    
+
     private static async Task<string> ComputeEtagAsync(
-        FileStore store,
-        Uri uri, 
+        File file,
         CancellationToken cancellationToken = default)
     {
-        await using var fileStream = await store.OpenFileStreamAsync(uri, OpenFileMode.Read, cancellationToken);
-        using var algorithm = MD5.Create();
-        var hash = await algorithm.ComputeHashAsync(fileStream, cancellationToken);
-
-        return string.Concat(Array.ConvertAll(hash, h => h.ToString("X2")));
+        // Use cached ETag computation - only recomputes if file has changed
+        return await ETagCache.Instance.GetOrComputeAsync(
+            file.properties.Uri,
+            file.properties.Length,
+            file.properties.LastModified,
+            async () => await file.store.OpenFileStreamAsync(file.properties.Uri, OpenFileMode.Read, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
     }
     
     internal static void RegisterProperties()
@@ -182,11 +183,13 @@ public class File : IStoreItem
             read: async (context, cancellationToken) =>
             {
                 var fileItem = (File)context.Item;
-                var etag = await ComputeEtagAsync(fileItem.store, fileItem.properties.Uri, cancellationToken);
-                
+                var etag = await ComputeEtagAsync(fileItem, cancellationToken);
+
                 context.SetResult(etag);
             },
-            metadata: new PropertyMetadata(Expensive: true, Computed: true));
+            // No longer expensive due to caching - ETag is computed from metadata
+            // and only reads file on first access or after modification
+            metadata: new PropertyMetadata(Expensive: false, Computed: true));
         
         Property.RegisterProperty<File>(
             XmlNames.ResourceType,

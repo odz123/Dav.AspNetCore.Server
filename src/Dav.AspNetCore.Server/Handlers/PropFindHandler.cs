@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Xml.Linq;
 using Dav.AspNetCore.Server.Http.Headers;
 using Dav.AspNetCore.Server.Store;
@@ -8,6 +9,9 @@ namespace Dav.AspNetCore.Server.Handlers;
 
 internal class PropFindHandler : RequestHandler
 {
+    // Maximum degree of parallelism for property retrieval
+    private const int MaxParallelism = 8;
+
     /// <summary>
     /// Handles the web dav request async.
     /// </summary>
@@ -32,51 +36,88 @@ internal class PropFindHandler : RequestHandler
             }
 
             var depth = headers.Depth ?? (Options.DisallowInfinityDepth ? Depth.One : Depth.Infinity);
-            await AddItemsRecursive(collection, depth, 0, items, cancellationToken);
+            await AddItemsRecursive(collection, depth, 0, items, cancellationToken).ConfigureAwait(false);
         }
         else
         {
             items.Add(Item);
         }
 
-        var requestedProperties = await GetRequestedPropertiesAsync(Context, cancellationToken);
-        
+        var requestedProperties = await GetRequestedPropertiesAsync(Context, cancellationToken).ConfigureAwait(false);
+
         var multiStatus = new XElement(XmlNames.MultiStatus);
         var document = new XDocument(
             new XDeclaration("1.0", "utf-8", null),
             multiStatus);
-        
-        foreach (var item in items)
+
+        var pathBase = Context.Request.PathBase.ToUriComponent();
+
+        // For large collections, use parallel property retrieval
+        if (items.Count > 10)
         {
-            var response = new XElement(XmlNames.Response);
-            response.Add(new XElement(XmlNames.Href, $"{Context.Request.PathBase.ToUriComponent()}{item.Uri.AbsolutePath}"));
+            var propertyResults = new ConcurrentDictionary<IStoreItem, Dictionary<XName, PropertyResult>>();
 
-            var propertyValues = await GetPropertiesAsync(
-                item,
-                requestedProperties,
-                cancellationToken);
-
-            foreach (var statusGrouping in propertyValues
-                         .GroupBy(x => x.Value.StatusCode))
+            // Fetch properties in parallel with limited concurrency
+            var semaphore = new SemaphoreSlim(MaxParallelism);
+            var tasks = items.Select(async item =>
             {
-                var propStat = new XElement(XmlNames.PropertyStatus);
-                var prop = new XElement(XmlNames.Property);   
-                
-                foreach (var property in statusGrouping)
+                await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
                 {
-                    prop.Add(new XElement(property.Key, property.Value.Value));
+                    var props = await GetPropertiesAsync(item, requestedProperties, cancellationToken).ConfigureAwait(false);
+                    propertyResults[item] = props;
                 }
+                finally
+                {
+                    semaphore.Release();
+                }
+            });
 
-                propStat.Add(prop);
-                propStat.Add(new XElement(XmlNames.Status, $"HTTP/1.1 {(int)statusGrouping.Key} {statusGrouping.Key.GetDisplayName()}"));
-                
-                response.Add(propStat);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+
+            // Build response in order
+            foreach (var item in items)
+            {
+                var response = BuildResponseElement(item, propertyResults[item], pathBase);
+                multiStatus.Add(response);
             }
-            
-            multiStatus.Add(response);
+        }
+        else
+        {
+            // For small collections, use sequential processing to avoid overhead
+            foreach (var item in items)
+            {
+                var propertyValues = await GetPropertiesAsync(item, requestedProperties, cancellationToken).ConfigureAwait(false);
+                var response = BuildResponseElement(item, propertyValues, pathBase);
+                multiStatus.Add(response);
+            }
         }
 
-        await Context.WriteDocumentAsync(DavStatusCode.MultiStatus, document, cancellationToken);
+        await Context.WriteDocumentAsync(DavStatusCode.MultiStatus, document, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static XElement BuildResponseElement(IStoreItem item, Dictionary<XName, PropertyResult> propertyValues, string pathBase)
+    {
+        var response = new XElement(XmlNames.Response);
+        response.Add(new XElement(XmlNames.Href, $"{pathBase}{item.Uri.AbsolutePath}"));
+
+        foreach (var statusGrouping in propertyValues.GroupBy(x => x.Value.StatusCode))
+        {
+            var propStat = new XElement(XmlNames.PropertyStatus);
+            var prop = new XElement(XmlNames.Property);
+
+            foreach (var property in statusGrouping)
+            {
+                prop.Add(new XElement(property.Key, property.Value.Value));
+            }
+
+            propStat.Add(prop);
+            propStat.Add(new XElement(XmlNames.Status, $"HTTP/1.1 {(int)statusGrouping.Key} {statusGrouping.Key.GetDisplayName()}"));
+
+            response.Add(propStat);
+        }
+
+        return response;
     }
 
     private static async Task AddItemsRecursive(
