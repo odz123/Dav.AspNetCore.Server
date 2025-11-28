@@ -58,7 +58,7 @@ internal sealed class SeekPatternTracker
     /// <returns>The predicted access pattern, or Sequential if unknown.</returns>
     public FileAccessPattern PredictPattern(string filePath)
     {
-        if (_trackers.TryGetValue(filePath, out var tracker))
+        if (_trackers.TryGetValue(filePath, out var tracker) && tracker != null)
         {
             return tracker.PredictedPattern;
         }
