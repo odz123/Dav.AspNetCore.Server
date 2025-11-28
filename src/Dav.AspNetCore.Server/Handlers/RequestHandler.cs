@@ -423,18 +423,23 @@ internal abstract class RequestHandler : IRequestHandler
 
     private async ValueTask<string?> GetCachedEtagAsync(IStoreItem item, CancellationToken cancellationToken = default)
     {
-        if (etagCache.TryGetValue(item.Uri, out var cachedEtag))
+        var uri = item.Uri;
+        if (uri != null && etagCache.TryGetValue(uri, out var cachedEtag))
             return cachedEtag;
 
         var etagResult = await PropertyManager.GetPropertyAsync(item, XmlNames.GetEtag, cancellationToken);
         var etag = etagResult.IsSuccess ? (string?)etagResult.Value : null;
-        etagCache[item.Uri] = etag;
+
+        if (uri != null)
+            etagCache[uri] = etag;
+
         return etag;
     }
 
     private async ValueTask<DateTimeOffset?> GetCachedLastModifiedAsync(IStoreItem item, CancellationToken cancellationToken = default)
     {
-        if (lastModifiedCache.TryGetValue(item.Uri, out var cachedLastModified))
+        var uri = item.Uri;
+        if (uri != null && lastModifiedCache.TryGetValue(uri, out var cachedLastModified))
             return cachedLastModified;
 
         var modifiedResult = await PropertyManager.GetPropertyAsync(item, XmlNames.GetLastModified, cancellationToken);
@@ -442,7 +447,9 @@ internal abstract class RequestHandler : IRequestHandler
         if (modifiedResult.IsSuccess && DateTimeOffset.TryParse(modifiedResult.Value?.ToString(), out var parsed))
             lastModified = parsed;
 
-        lastModifiedCache[item.Uri] = lastModified;
+        if (uri != null)
+            lastModifiedCache[uri] = lastModified;
+
         return lastModified;
     }
 
