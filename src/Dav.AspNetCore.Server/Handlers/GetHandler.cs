@@ -168,7 +168,7 @@ internal class GetHandler : RequestHandler
     /// Checks If-Range precondition and returns whether ranges should be disabled.
     /// </summary>
     private static bool CheckIfRangeCondition(
-        Microsoft.Net.Http.Headers.RequestHeaders requestHeaders,
+        Microsoft.AspNetCore.Http.Headers.RequestHeaders requestHeaders,
         FilePropertySet properties)
     {
         if (requestHeaders.IfRange == null)
