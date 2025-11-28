@@ -89,8 +89,8 @@ internal class LockHandler : RequestHandler
                 cancellationToken);
         }
         else if (Context.Request.ContentType != null &&
-                 (Context.Request.ContentType.Contains("application/xml") ||
-                  Context.Request.ContentType.Contains("text/xml")) &&
+                 (Context.Request.ContentType.Contains("application/xml", StringComparison.OrdinalIgnoreCase) ||
+                  Context.Request.ContentType.Contains("text/xml", StringComparison.OrdinalIgnoreCase)) &&
                  (Context.Request.ContentLength is null or > 0))
         {
             var requestDocument = await Context.ReadDocumentAsync(cancellationToken);

@@ -83,8 +83,8 @@ internal static class HttpContextExtensions
         if (context.Request.ContentType == null)
             return null;
 
-        if (!context.Request.ContentType.Contains("application/xml") &&
-            !context.Request.ContentType.Contains("text/xml"))
+        if (!context.Request.ContentType.Contains("application/xml", StringComparison.OrdinalIgnoreCase) &&
+            !context.Request.ContentType.Contains("text/xml", StringComparison.OrdinalIgnoreCase))
             return null;
 
         try
