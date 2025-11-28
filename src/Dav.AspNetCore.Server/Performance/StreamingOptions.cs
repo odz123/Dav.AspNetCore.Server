@@ -63,6 +63,20 @@ public class StreamingOptions
     public int KeepAliveTimeout { get; set; } = 120;
 
     /// <summary>
+    /// When true, uses OS-level read-ahead hints for sequential file access.
+    /// This can significantly improve streaming performance on Linux (sendfile) and Windows.
+    /// Default is true.
+    /// </summary>
+    public bool EnableReadAhead { get; set; } = true;
+
+    /// <summary>
+    /// When true, uses random access hints for range requests (seeking).
+    /// This disables read-ahead and optimizes for random I/O patterns.
+    /// Default is true.
+    /// </summary>
+    public bool EnableRandomAccessHints { get; set; } = true;
+
+    /// <summary>
     /// Applies the configuration to the static caches and pools.
     /// Call this during application startup.
     /// </summary>
@@ -77,15 +91,30 @@ public class StreamingOptions
 
     /// <summary>
     /// Creates a configuration optimized for NZB/Usenet streaming.
-    /// Uses fast ETags and maximum buffer sizes.
+    /// Prioritizes fast stream starts and efficient seeking.
+    /// Key optimizations:
+    /// - Fast ETags (no content hashing)
+    /// - Large buffers for sequential streaming
+    /// - Smaller buffers for range requests (seeking)
+    /// - OS-level read-ahead hints
+    /// - Zero-copy file transfers
     /// </summary>
     public static StreamingOptions ForNzbStreaming() => new()
     {
+        // Skip content hashing - use metadata-based ETags for instant responses
         AlwaysUseFastETag = true,
         FastETagThreshold = 0,
+
+        // Aggressive buffering for streaming throughput
         StreamingBufferThreshold = 10 * 1024 * 1024, // 10MB
-        StreamingBufferSize = 1024 * 1024, // 1MB
+        StreamingBufferSize = 1024 * 1024, // 1MB buffers
+
+        // Enable all OS-level optimizations
         EnableSendFileOptimization = true,
+        EnableReadAhead = true,
+        EnableRandomAccessHints = true,
+
+        // Long-lived connections for streaming
         CacheControlMaxAge = 3600,
         KeepAliveTimeout = 300
     };
@@ -101,6 +130,8 @@ public class StreamingOptions
         StreamingBufferThreshold = 50 * 1024 * 1024, // 50MB
         StreamingBufferSize = 1024 * 1024, // 1MB
         EnableSendFileOptimization = true,
+        EnableReadAhead = true,
+        EnableRandomAccessHints = true,
         CacheControlMaxAge = 86400, // 24 hours
         KeepAliveTimeout = 300
     };
@@ -116,7 +147,35 @@ public class StreamingOptions
         StreamingBufferThreshold = 50 * 1024 * 1024, // 50MB
         StreamingBufferSize = 256 * 1024, // 256KB
         EnableSendFileOptimization = true,
+        EnableReadAhead = true,
+        EnableRandomAccessHints = true,
         CacheControlMaxAge = 3600,
         KeepAliveTimeout = 120
+    };
+
+    /// <summary>
+    /// Creates a configuration optimized for minimal latency.
+    /// Prioritizes time-to-first-byte over throughput.
+    /// </summary>
+    public static StreamingOptions ForLowLatency() => new()
+    {
+        // Instant ETag responses
+        AlwaysUseFastETag = true,
+        FastETagThreshold = 0,
+
+        // Smaller buffers for faster first-byte delivery
+        StreamingBufferThreshold = 1024 * 1024, // 1MB
+        StreamingBufferSize = 64 * 1024, // 64KB
+        LargeBufferSize = 64 * 1024,
+        DefaultBufferSize = 32 * 1024,
+
+        // Enable optimizations
+        EnableSendFileOptimization = true,
+        EnableReadAhead = false, // Disable for lower latency
+        EnableRandomAccessHints = true,
+
+        // Shorter timeouts for faster error detection
+        CacheControlMaxAge = 1800,
+        KeepAliveTimeout = 60
     };
 }

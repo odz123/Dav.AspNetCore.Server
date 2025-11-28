@@ -12,6 +12,7 @@ internal class GetHandler : RequestHandler
 {
     /// <summary>
     /// Handles the web dav request async.
+    /// Optimized for fast stream starts and efficient seeking.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns></returns>
@@ -23,10 +24,122 @@ internal class GetHandler : RequestHandler
             return;
         }
 
-        // Fetch all properties in parallel for better performance
+        var requestHeaders = Context.Request.GetTypedHeaders();
+
+        // OPTIMIZATION: Determine access pattern early (before opening stream)
+        // This allows us to use appropriate FileOptions and avoid unnecessary stream opens
+        var hasRangeRequest = requestHeaders.Range != null &&
+                             requestHeaders.Range.Unit.Equals("bytes") &&
+                             requestHeaders.Range.Ranges.Count == 1;
+
+        // Check for optimized streaming interface
+        var optimizedItem = Item as IOptimizedStreamable;
+        var physicalFile = Item as IPhysicalFileInfo;
+        var physicalPath = physicalFile?.PhysicalPath;
+        var hasPhysicalPath = !string.IsNullOrEmpty(physicalPath);
+
+        // OPTIMIZATION: For HEAD requests with IOptimizedStreamable, avoid opening stream entirely
+        var isHeadRequest = Context.Request.Method == WebDavMethods.Head;
+
+        // Get content length early - without opening stream if possible
+        long contentLength;
+        if (optimizedItem != null)
+        {
+            // Fast path: get length from cached metadata
+            contentLength = optimizedItem.Length;
+        }
+        else
+        {
+            // Fallback: parse from properties
+            var contentLengthStr = await GetNonExpensivePropertyAsync(Item, XmlNames.GetContentLength, cancellationToken);
+            contentLength = long.TryParse(contentLengthStr, out var len) ? len : -1L;
+        }
+
+        // Fetch essential properties in parallel
         var properties = await GetPropertiesParallelAsync(Item, cancellationToken);
 
-        // Set response headers
+        // Set response headers early to reduce TTFB
+        SetResponseHeaders(properties, contentLength);
+
+        // Determine if ranges should be disabled based on IfRange
+        var disableRanges = CheckIfRangeCondition(requestHeaders, properties);
+
+        // OPTIMIZATION: Handle HEAD requests without opening the stream
+        if (isHeadRequest)
+        {
+            await HandleHeadRequestAsync(contentLength, hasPhysicalPath || optimizedItem != null);
+            return;
+        }
+
+        // Determine the actual access pattern for stream optimization
+        var accessPattern = (hasRangeRequest && !disableRanges)
+            ? FileAccessPattern.RandomAccess
+            : FileAccessPattern.Sequential;
+
+        // OPTIMIZATION: For physical files with SendFile support, use zero-copy transfer
+        if (hasPhysicalPath && !disableRanges)
+        {
+            await SendFileZeroCopyAsync(physicalPath!, contentLength, hasRangeRequest, cancellationToken);
+            return;
+        }
+
+        // Open stream with optimized access pattern
+        Stream readableStream;
+        if (optimizedItem != null)
+        {
+            // Use optimized stream with appropriate FileOptions
+            readableStream = await optimizedItem.GetOptimizedReadableStreamAsync(accessPattern, cancellationToken);
+        }
+        else
+        {
+            // Fallback to regular stream
+            readableStream = await Item.GetReadableStreamAsync(cancellationToken);
+        }
+
+        await using (readableStream)
+        {
+            if (hasRangeRequest && !disableRanges && readableStream.CanSeek)
+            {
+                await SendRangeDataAsync(Context, readableStream, cancellationToken);
+            }
+            else
+            {
+                await SendFullDataAsync(Context, readableStream, contentLength, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Handles HEAD requests without opening the file stream.
+    /// This is a significant optimization for clients that probe file metadata.
+    /// </summary>
+    private Task HandleHeadRequestAsync(long contentLength, bool supportsRanges)
+    {
+        if (supportsRanges)
+        {
+            Context.Response.Headers["Accept-Ranges"] = "bytes";
+        }
+        else
+        {
+            Context.Response.Headers["Accept-Ranges"] = "none";
+        }
+
+        if (contentLength >= 0)
+        {
+            Context.Response.ContentLength = contentLength;
+        }
+
+        AddStreamingHeaders(Context, Context.Response.ContentType, contentLength);
+        Context.SetResult(DavStatusCode.Ok);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Sets response headers from pre-fetched properties.
+    /// Called early to reduce time-to-first-byte.
+    /// </summary>
+    private void SetResponseHeaders(FilePropertySet properties, long contentLength)
+    {
         if (!string.IsNullOrWhiteSpace(properties.ContentType))
             Context.Response.Headers["Content-Type"] = properties.ContentType;
 
@@ -39,167 +152,220 @@ internal class GetHandler : RequestHandler
         if (!string.IsNullOrWhiteSpace(properties.ETag))
             Context.Response.Headers["ETag"] = $"\"{properties.ETag}\"";
 
-        if (!string.IsNullOrWhiteSpace(properties.ContentLength))
-            Context.Response.Headers["Content-Length"] = properties.ContentLength;
+        if (contentLength >= 0)
+            Context.Response.Headers["Content-Length"] = contentLength.ToString();
 
         // Add Content-Disposition header for file downloads
-        var fileName = GetFileName(Item.Uri);
+        var fileName = GetFileName(Item!.Uri);
         if (!string.IsNullOrWhiteSpace(fileName))
         {
             var encodedFileName = WebUtility.UrlEncode(fileName);
             Context.Response.Headers["Content-Disposition"] = $"inline; filename=\"{fileName}\"; filename*=UTF-8''{encodedFileName}";
         }
-
-        // Parse content length for buffer optimization
-        var contentLength = long.TryParse(properties.ContentLength, out var length) ? length : -1L;
-
-        await using var readableStream = await Item.GetReadableStreamAsync(cancellationToken);
-        if (readableStream.CanSeek)
-        {
-            Context.Response.Headers["Accept-Ranges"] = "bytes";
-            Context.Response.ContentLength = readableStream.Length;
-            contentLength = readableStream.Length;
-        }
-        else
-        {
-            Context.Response.Headers["Accept-Ranges"] = "none";
-        }
-
-        // Add streaming-optimized headers
-        AddStreamingHeaders(Context, properties.ContentType, contentLength);
-
-        if (Context.Request.Method == WebDavMethods.Head)
-        {
-            Context.SetResult(DavStatusCode.Ok);
-            return;
-        }
-
-        var disableRanges = false;
-
-        var requestHeaders = Context.Request.GetTypedHeaders();
-        if (requestHeaders.IfRange != null)
-        {
-            if (requestHeaders.IfRange.EntityTag != null &&
-                !string.IsNullOrWhiteSpace(properties.ETag) &&
-                requestHeaders.IfRange.EntityTag.Tag != $"\"{properties.ETag}\"")
-            {
-                disableRanges = true;
-            }
-
-            if (requestHeaders.IfRange.LastModified != null &&
-                !string.IsNullOrWhiteSpace(properties.LastModified) &&
-                DateTimeOffset.TryParse(properties.LastModified, out var parsedLastModified) &&
-                requestHeaders.IfRange.LastModified != parsedLastModified)
-            {
-                disableRanges = true;
-            }
-        }
-
-        // Try SendFile optimization for physical files (zero-copy transfer)
-        var physicalFile = Item as IPhysicalFileInfo;
-        var physicalPath = physicalFile?.PhysicalPath;
-
-        if (!string.IsNullOrEmpty(physicalPath) && !disableRanges)
-        {
-            await SendFileOptimizedAsync(Context, physicalPath, readableStream, contentLength, cancellationToken);
-        }
-        else
-        {
-            await SendDataAsync(Context, readableStream, disableRanges, contentLength, cancellationToken);
-        }
     }
 
     /// <summary>
-    /// Sends file data using SendFileAsync for zero-copy transfers when possible.
-    /// Falls back to stream-based transfer for range requests.
+    /// Checks If-Range precondition and returns whether ranges should be disabled.
     /// </summary>
-    private static async Task SendFileOptimizedAsync(
-        HttpContext context,
+    private static bool CheckIfRangeCondition(
+        Microsoft.Net.Http.Headers.RequestHeaders requestHeaders,
+        FilePropertySet properties)
+    {
+        if (requestHeaders.IfRange == null)
+            return false;
+
+        // Check ETag mismatch
+        if (requestHeaders.IfRange.EntityTag != null &&
+            !string.IsNullOrWhiteSpace(properties.ETag) &&
+            requestHeaders.IfRange.EntityTag.Tag != $"\"{properties.ETag}\"")
+        {
+            return true;
+        }
+
+        // Check Last-Modified mismatch
+        if (requestHeaders.IfRange.LastModified != null &&
+            !string.IsNullOrWhiteSpace(properties.LastModified) &&
+            DateTimeOffset.TryParse(properties.LastModified, out var parsedLastModified) &&
+            requestHeaders.IfRange.LastModified != parsedLastModified)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Sends file using zero-copy SendFileAsync - the fastest possible method.
+    /// Handles both full file and range requests using kernel-level optimization.
+    /// </summary>
+    private async Task SendFileZeroCopyAsync(
         string physicalPath,
-        Stream stream,
         long contentLength,
+        bool hasRangeRequest,
         CancellationToken cancellationToken)
     {
-        var requestHeaders = context.Request.GetTypedHeaders();
-        var responseBodyFeature = context.Features.Get<IHttpResponseBodyFeature>();
+        var requestHeaders = Context.Request.GetTypedHeaders();
+        var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
 
-        // Handle range requests - still need to use stream for these
-        if (requestHeaders.Range != null &&
-            requestHeaders.Range.Unit.Equals("bytes") &&
-            requestHeaders.Range.Ranges.Count == 1 &&
-            stream.CanSeek)
+        Context.Response.Headers["Accept-Ranges"] = "bytes";
+        AddStreamingHeaders(Context, Context.Response.ContentType, contentLength);
+
+        // Handle range requests using SendFile with offset/length
+        if (hasRangeRequest)
         {
-            var range = requestHeaders.Range.Ranges.First();
-            var streamLength = stream.Length;
+            var range = requestHeaders.Range!.Ranges.First();
 
-            // Calculate range parameters
-            long offset = 0;
-            long length = streamLength;
-
-            // Suffix range: last N bytes (e.g., "bytes=-500")
-            if (range.From == null && range.To != null)
+            // Calculate range parameters using known content length
+            if (!TryCalculateRange(range, contentLength, out var offset, out var length))
             {
-                var suffixLength = Math.Min(range.To.Value, streamLength);
-                offset = streamLength - suffixLength;
-                length = suffixLength;
-            }
-            // Open-ended range: from byte N to end (e.g., "bytes=500-")
-            else if (range.From != null && range.To == null)
-            {
-                if (range.From.Value >= streamLength)
-                {
-                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
-                    return;
-                }
-                offset = range.From.Value;
-                length = streamLength - offset;
-            }
-            // Bounded range (e.g., "bytes=500-999")
-            else if (range.From != null && range.To != null)
-            {
-                if (range.From.Value > range.To.Value || range.From.Value >= streamLength)
-                {
-                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
-                    return;
-                }
-                offset = range.From.Value;
-                var effectiveTo = Math.Min(range.To.Value, streamLength - 1);
-                length = effectiveTo - offset + 1;
+                Context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+                Context.Response.Headers["Content-Range"] = $"bytes */{contentLength}";
+                return;
             }
 
-            context.SetResult(DavStatusCode.PartialContent);
-            context.Response.ContentLength = length;
-            context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{streamLength}";
+            Context.SetResult(DavStatusCode.PartialContent);
+            Context.Response.ContentLength = length;
+            Context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{contentLength}";
 
-            // Use SendFileAsync for partial content (zero-copy)
             if (responseBodyFeature != null)
             {
+                // Zero-copy range transfer - kernel handles seeking
                 await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                // Fallback to stream-based transfer
+                // Fallback: open stream with RandomAccess hint
+                await using var stream = OptimizedFileStream.OpenForRandomAccess(physicalPath);
                 stream.Seek(offset, SeekOrigin.Begin);
-                var bufferSize = BufferPool.GetOptimalBufferSize(length);
-                await stream.CopyToPooledAsync(context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+                var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, FileAccessPattern.RandomAccess);
+                await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
             }
             return;
         }
 
         // Full file transfer using SendFileAsync (zero-copy)
-        context.SetResult(DavStatusCode.Ok);
+        Context.SetResult(DavStatusCode.Ok);
+        Context.Response.ContentLength = contentLength;
+
         if (responseBodyFeature != null)
         {
             await responseBodyFeature.SendFileAsync(physicalPath, 0, contentLength > 0 ? contentLength : null, cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            // Fallback to stream-based transfer
-            var bufferSize = BufferPool.GetOptimalBufferSize(contentLength);
-            await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+            // Fallback: open stream with Sequential hint for read-ahead
+            await using var stream = OptimizedFileStream.OpenForSequentialRead(physicalPath);
+            var bufferSize = OptimizedFileStream.GetOptimalBufferSize(contentLength, FileAccessPattern.Sequential);
+            await stream.CopyToPooledAsync(Context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Tries to calculate the byte range from a range header.
+    /// Returns false if the range is unsatisfiable.
+    /// </summary>
+    private static bool TryCalculateRange(
+        Microsoft.Net.Http.Headers.RangeItemHeaderValue range,
+        long fileLength,
+        out long offset,
+        out long length)
+    {
+        offset = 0;
+        length = fileLength;
+
+        // Suffix range: last N bytes (e.g., "bytes=-500")
+        if (range.From == null && range.To != null)
+        {
+            var suffixLength = Math.Min(range.To.Value, fileLength);
+            offset = fileLength - suffixLength;
+            length = suffixLength;
+            return true;
+        }
+
+        // Open-ended range: from byte N to end (e.g., "bytes=500-")
+        if (range.From != null && range.To == null)
+        {
+            if (range.From.Value >= fileLength)
+                return false;
+
+            offset = range.From.Value;
+            length = fileLength - offset;
+            return true;
+        }
+
+        // Bounded range (e.g., "bytes=500-999")
+        if (range.From != null && range.To != null)
+        {
+            if (range.From.Value > range.To.Value || range.From.Value >= fileLength)
+                return false;
+
+            offset = range.From.Value;
+            var effectiveTo = Math.Min(range.To.Value, fileLength - 1);
+            length = effectiveTo - offset + 1;
+            return true;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Sends range data from a stream (for non-physical files).
+    /// </summary>
+    private static async Task SendRangeDataAsync(
+        HttpContext context,
+        Stream stream,
+        CancellationToken cancellationToken)
+    {
+        var requestHeaders = context.Request.GetTypedHeaders();
+        var range = requestHeaders.Range!.Ranges.First();
+        var streamLength = stream.Length;
+
+        if (!TryCalculateRange(range, streamLength, out var offset, out var length))
+        {
+            context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+            context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
+            return;
+        }
+
+        // Seek to the start position
+        stream.Seek(offset, SeekOrigin.Begin);
+
+        context.SetResult(DavStatusCode.PartialContent);
+        context.Response.ContentLength = length;
+        context.Response.Headers["Content-Range"] = $"bytes {offset}-{offset + length - 1}/{streamLength}";
+        context.Response.Headers["Accept-Ranges"] = "bytes";
+
+        // Use optimal buffer size for range requests (smaller for random access)
+        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, FileAccessPattern.RandomAccess);
+        await stream.CopyToPooledAsync(context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends full file data from a stream.
+    /// </summary>
+    private static async Task SendFullDataAsync(
+        HttpContext context,
+        Stream stream,
+        long contentLength,
+        CancellationToken cancellationToken)
+    {
+        context.SetResult(DavStatusCode.Ok);
+
+        if (stream.CanSeek)
+        {
+            context.Response.Headers["Accept-Ranges"] = "bytes";
+            context.Response.ContentLength = stream.Length;
+        }
+        else
+        {
+            context.Response.Headers["Accept-Ranges"] = "none";
+        }
+
+        AddStreamingHeaders(context, context.Response.ContentType, contentLength);
+
+        // Use optimal buffer size for sequential reads
+        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(contentLength, FileAccessPattern.Sequential);
+        await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -273,7 +439,7 @@ internal class GetHandler : RequestHandler
             context.Response.Headers["Cache-Control"] = "private, max-age=3600, must-revalidate";
         }
 
-        // Disable response buffering for streaming
+        // Disable response buffering for streaming - critical for fast TTFB
         var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
         bufferingFeature?.DisableBuffering();
 
@@ -297,94 +463,5 @@ internal class GetHandler : RequestHandler
                contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
                contentType.Equals("application/x-nzb", StringComparison.OrdinalIgnoreCase) ||
                contentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static async Task SendDataAsync(
-        HttpContext context,
-        Stream stream,
-        bool disableRanges,
-        long contentLength,
-        CancellationToken cancellationToken = default)
-    {
-        var requestHeaders = context.Request.GetTypedHeaders();
-        var bufferSize = BufferPool.GetOptimalBufferSize(contentLength);
-
-        if (!disableRanges &&
-            requestHeaders.Range != null &&
-            requestHeaders.Range.Unit.Equals("bytes") &&
-            requestHeaders.Range.Ranges.Count == 1 &&
-            stream.CanSeek)
-        {
-            var range = requestHeaders.Range.Ranges.First();
-
-            var bytesToRead = 0L;
-            var streamLength = stream.Length;
-
-            // Suffix range: last N bytes (e.g., "bytes=-500")
-            if (range.From == null && range.To != null)
-            {
-                // If suffix length exceeds file size, return entire file
-                var suffixLength = Math.Min(range.To.Value, streamLength);
-                stream.Seek(-suffixLength, SeekOrigin.End);
-                bytesToRead = suffixLength;
-            }
-
-            // Open-ended range: from byte N to end (e.g., "bytes=500-")
-            if (range.From != null && range.To == null)
-            {
-                // If start position is beyond file size, range is unsatisfiable
-                if (range.From.Value >= streamLength)
-                {
-                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
-                    return;
-                }
-                stream.Seek(range.From.Value, SeekOrigin.Begin);
-                bytesToRead = streamLength - stream.Position;
-            }
-
-            // Bounded range (e.g., "bytes=500-999")
-            if (range.From != null && range.To != null)
-            {
-                // Validate range: From must be <= To
-                if (range.From.Value > range.To.Value)
-                {
-                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
-                    return;
-                }
-
-                // If start position is beyond file size, range is unsatisfiable
-                if (range.From.Value >= streamLength)
-                {
-                    context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                    context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
-                    return;
-                }
-
-                // Clamp end position to file size - 1
-                var effectiveTo = Math.Min(range.To.Value, streamLength - 1);
-                stream.Seek(range.From.Value, SeekOrigin.Begin);
-                bytesToRead = effectiveTo - range.From.Value + 1;
-            }
-
-            context.SetResult(DavStatusCode.PartialContent);
-
-            var rangeStart = stream.Position;
-            var rangeEnd = rangeStart + bytesToRead - 1;
-
-            context.Response.ContentLength = bytesToRead;
-            context.Response.Headers["Content-Range"] = $"bytes {rangeStart}-{rangeEnd}/{stream.Length}";
-
-            // Use optimal buffer size for range requests
-            var rangeBufferSize = BufferPool.GetOptimalBufferSize(bytesToRead);
-            await stream.CopyToPooledAsync(context.Response.Body, bytesToRead, rangeBufferSize, cancellationToken).ConfigureAwait(false);
-
-            return;
-        }
-
-        context.SetResult(DavStatusCode.Ok);
-        // Use optimal buffer size for full file transfers
-        await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
     }
 }

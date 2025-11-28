@@ -105,6 +105,20 @@ public class LocalFileStore : FileStore
             : System.IO.File.Create(path));
     }
 
+    /// <summary>
+    /// Opens a file stream with optimized settings for the specified access pattern.
+    /// Uses FileOptions.SequentialScan for streaming and FileOptions.RandomAccess for seeking.
+    /// </summary>
+    public override ValueTask<Stream> OpenOptimizedReadStreamAsync(
+        Uri uri,
+        Performance.FileAccessPattern accessPattern,
+        CancellationToken cancellationToken = default)
+    {
+        var path = GetSafePath(uri);
+        return ValueTask.FromResult<Stream>(
+            Performance.OptimizedFileStream.OpenForRead(path, accessPattern));
+    }
+
     public override ValueTask CreateDirectoryAsync(Uri uri, CancellationToken cancellationToken)
     {
         var path = GetSafePath(uri);
