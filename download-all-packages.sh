@@ -72,7 +72,7 @@ download_package "xunit.extensibility.execution" "2.9.2"
 download_package "xunit.assert" "2.9.2"
 download_package "xunit.abstractions" "2.0.3"
 download_package "xunit.analyzers" "1.16.0"
-download_package "xunit.runner.utility" "2.8.2"
+# xunit.runner.utility is not needed for .NET 6+
 
 # Moq dependencies
 download_package "Castle.Core" "5.1.1"
