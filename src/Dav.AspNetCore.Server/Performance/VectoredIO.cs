@@ -21,23 +21,23 @@ internal static class VectoredIO
     public static bool IsAvailable => LazyIsAvailable.Value;
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct iovec
+    private struct Iovec
     {
-        public IntPtr iov_base;
-        public nuint iov_len;
+        public IntPtr Base;
+        public nuint Length;
     }
 
     [DllImport("libc", EntryPoint = "readv", SetLastError = true)]
-    private static extern long readv(int fd, iovec[] iov, int iovcnt);
+    private static extern long readv(int fd, Iovec[] iov, int iovcnt);
 
     [DllImport("libc", EntryPoint = "writev", SetLastError = true)]
-    private static extern long writev(int fd, iovec[] iov, int iovcnt);
+    private static extern long writev(int fd, Iovec[] iov, int iovcnt);
 
     [DllImport("libc", EntryPoint = "preadv", SetLastError = true)]
-    private static extern long preadv(int fd, iovec[] iov, int iovcnt, long offset);
+    private static extern long preadv(int fd, Iovec[] iov, int iovcnt, long offset);
 
     [DllImport("libc", EntryPoint = "pwritev", SetLastError = true)]
-    private static extern long pwritev(int fd, iovec[] iov, int iovcnt, long offset);
+    private static extern long pwritev(int fd, Iovec[] iov, int iovcnt, long offset);
 
     private static bool CheckVectoredIOAvailable()
     {
@@ -46,7 +46,7 @@ internal static class VectoredIO
 
         try
         {
-            var iov = new iovec[1];
+            var iov = new Iovec[1];
             var result = readv(-1, iov, 0);
             // Syscall is available even if it returned error
             return true;
@@ -63,13 +63,13 @@ internal static class VectoredIO
     /// <param name="fd">File descriptor.</param>
     /// <param name="buffers">Array of buffers to read into.</param>
     /// <returns>Total bytes read, or -1 on error.</returns>
-    public static unsafe long ReadV(int fd, Span<Memory<byte>> buffers)
+    public static long ReadV(int fd, Span<Memory<byte>> buffers)
     {
         if (!IsAvailable || fd < 0 || buffers.IsEmpty)
             return -1;
 
         var iovCount = Math.Min(buffers.Length, MaxIovEntries);
-        var iov = new iovec[iovCount];
+        var iov = new Iovec[iovCount];
         var handles = new GCHandle[iovCount];
 
         try
@@ -78,8 +78,8 @@ internal static class VectoredIO
             {
                 var buffer = buffers[i];
                 handles[i] = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                iov[i].iov_base = handles[i].AddrOfPinnedObject();
-                iov[i].iov_len = (nuint)buffer.Length;
+                iov[i].Base = handles[i].AddrOfPinnedObject();
+                iov[i].Length = (nuint)buffer.Length;
             }
 
             return readv(fd, iov, iovCount);
@@ -102,13 +102,13 @@ internal static class VectoredIO
     /// <param name="buffers">Array of buffers to read into.</param>
     /// <param name="offset">File offset to read from.</param>
     /// <returns>Total bytes read, or -1 on error.</returns>
-    public static unsafe long PReadV(int fd, Span<Memory<byte>> buffers, long offset)
+    public static long PReadV(int fd, Span<Memory<byte>> buffers, long offset)
     {
         if (!IsAvailable || fd < 0 || buffers.IsEmpty || offset < 0)
             return -1;
 
         var iovCount = Math.Min(buffers.Length, MaxIovEntries);
-        var iov = new iovec[iovCount];
+        var iov = new Iovec[iovCount];
         var handles = new GCHandle[iovCount];
 
         try
@@ -117,8 +117,8 @@ internal static class VectoredIO
             {
                 var buffer = buffers[i];
                 handles[i] = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                iov[i].iov_base = handles[i].AddrOfPinnedObject();
-                iov[i].iov_len = (nuint)buffer.Length;
+                iov[i].Base = handles[i].AddrOfPinnedObject();
+                iov[i].Length = (nuint)buffer.Length;
             }
 
             return preadv(fd, iov, iovCount, offset);
@@ -139,13 +139,13 @@ internal static class VectoredIO
     /// <param name="fd">File descriptor.</param>
     /// <param name="buffers">Array of buffers to write from.</param>
     /// <returns>Total bytes written, or -1 on error.</returns>
-    public static unsafe long WriteV(int fd, ReadOnlySpan<ReadOnlyMemory<byte>> buffers)
+    public static long WriteV(int fd, ReadOnlySpan<ReadOnlyMemory<byte>> buffers)
     {
         if (!IsAvailable || fd < 0 || buffers.IsEmpty)
             return -1;
 
         var iovCount = Math.Min(buffers.Length, MaxIovEntries);
-        var iov = new iovec[iovCount];
+        var iov = new Iovec[iovCount];
         var handles = new GCHandle[iovCount];
 
         try
@@ -154,8 +154,8 @@ internal static class VectoredIO
             {
                 var buffer = buffers[i];
                 handles[i] = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                iov[i].iov_base = handles[i].AddrOfPinnedObject();
-                iov[i].iov_len = (nuint)buffer.Length;
+                iov[i].Base = handles[i].AddrOfPinnedObject();
+                iov[i].Length = (nuint)buffer.Length;
             }
 
             return writev(fd, iov, iovCount);
@@ -192,7 +192,7 @@ internal static class VectoredIO
 
         var results = new byte[chunks.Length][];
         var iovCount = Math.Min(chunks.Length, MaxIovEntries);
-        var iov = new iovec[iovCount];
+        var iov = new Iovec[iovCount];
         var handles = new GCHandle[iovCount];
 
         try
@@ -202,15 +202,15 @@ internal static class VectoredIO
             {
                 results[i] = new byte[chunks[i].Length];
                 handles[i] = GCHandle.Alloc(results[i], GCHandleType.Pinned);
-                iov[i].iov_base = handles[i].AddrOfPinnedObject();
-                iov[i].iov_len = (nuint)chunks[i].Length;
+                iov[i].Base = handles[i].AddrOfPinnedObject();
+                iov[i].Length = (nuint)chunks[i].Length;
             }
 
             // Use preadv for each offset (vectored but still needs multiple calls for different offsets)
             // For true scatter-gather at different offsets, we'd need io_uring
             for (int i = 0; i < iovCount; i++)
             {
-                var singleIov = new iovec[] { iov[i] };
+                var singleIov = new Iovec[] { iov[i] };
                 preadv(fd, singleIov, 1, chunks[i].Offset);
             }
 
@@ -270,7 +270,7 @@ internal static class VectoredIO
         }
 
         var iovCount = Math.Min(buffers.Length, MaxIovEntries);
-        var iov = new iovec[iovCount];
+        var iov = new Iovec[iovCount];
         var handles = new GCHandle[iovCount];
 
         try
@@ -278,8 +278,8 @@ internal static class VectoredIO
             for (int i = 0; i < iovCount; i++)
             {
                 handles[i] = GCHandle.Alloc(buffers[i], GCHandleType.Pinned);
-                iov[i].iov_base = handles[i].AddrOfPinnedObject();
-                iov[i].iov_len = (nuint)buffers[i].Length;
+                iov[i].Base = handles[i].AddrOfPinnedObject();
+                iov[i].Length = (nuint)buffers[i].Length;
             }
 
             return preadv(fd, iov, iovCount, offset);
