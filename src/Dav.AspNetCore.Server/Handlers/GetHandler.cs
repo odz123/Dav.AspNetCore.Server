@@ -224,50 +224,105 @@ internal class GetHandler : RequestHandler
             var (pattern, prefetchHint) = SeekPatternTracker.Instance.RecordAccessWithPrefetch(
                 filePath, offset, length, contentLength);
 
-            // Queue background prefetch for predicted next request
-            if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3)
+            // OPTIMIZATION: Check if this is an initial range (first bytes) for priority handling
+            var isInitialRange = InitialRangePrioritizer.Instance.IsInitialRange(offset);
+            var prioritySlot = isInitialRange
+                ? await InitialRangePrioritizer.Instance.AcquirePrioritySlotAsync(offset, cancellationToken)
+                : null;
+
+            try
             {
-                PrefetchService.Instance.QueuePrefetch(physicalPath, prefetchHint.Value);
-            }
+                // OPTIMIZATION: For initial ranges, use smaller buffers for faster TTFB
+                var rangeSettings = InitialRangePrioritizer.Instance.GetSettings(offset, length);
 
-            Context.SetResult(DavStatusCode.PartialContent);
-            Context.Response.ContentLength = length;
-            Context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, contentLength);
+                // OPTIMIZATION: For sequential patterns, consider coalescing reads for efficiency
+                var shouldCoalesce = RangeCoalescer.Instance.ShouldUseReadAhead(filePath);
+                long actualReadLength = length;
 
-            // OPTIMIZATION: Flush headers immediately to reduce seek response latency
-            await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
-
-            // OPTIMIZATION: Try memory-mapped file for random access patterns (fastest seeking)
-            if (pattern == FileAccessPattern.RandomAccess &&
-                MemoryMappedFilePool.ShouldUseMemoryMapping(contentLength, pattern))
-            {
-                var lastModified = System.IO.File.GetLastWriteTimeUtc(physicalPath);
-                var mappedStream = MemoryMappedFilePool.Instance.GetMappedRangeStream(
-                    physicalPath, contentLength, lastModified, offset, length);
-
-                if (mappedStream != null)
+                if (shouldCoalesce && !isInitialRange && pattern == FileAccessPattern.Sequential)
                 {
-                    await using (mappedStream)
+                    var (_, coalescedLength) = RangeCoalescer.Instance.GetOptimizedRange(
+                        filePath, offset, length, contentLength);
+                    // Prefetch the coalesced region but only return the requested range
+                    if (coalescedLength > length)
                     {
-                        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, pattern);
-                        await mappedStream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+                        // Queue prefetch for the extended region
+                        PrefetchService.Instance.QueuePrefetch(physicalPath, offset + length, coalescedLength - length);
                     }
-                    return;
+                }
+
+                // Queue background prefetch for predicted next request
+                if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3)
+                {
+                    // Use adaptive prefetch sizing based on throughput
+                    var adaptivePrefetchSize = AdaptivePrefetch.Instance.GetOptimalPrefetchSize(filePath, contentLength);
+                    var adjustedHint = new PrefetchHint(
+                        prefetchHint.Value.PredictedOffset,
+                        Math.Max(prefetchHint.Value.PrefetchSize, adaptivePrefetchSize),
+                        prefetchHint.Value.Confidence);
+                    PrefetchService.Instance.QueuePrefetch(physicalPath, adjustedHint);
+                }
+
+                Context.SetResult(DavStatusCode.PartialContent);
+                Context.Response.ContentLength = length;
+                Context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, contentLength);
+
+                // OPTIMIZATION: Flush headers immediately to reduce seek response latency
+                await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
+                // OPTIMIZATION: Try memory-mapped file for random access patterns (fastest seeking)
+                if (pattern == FileAccessPattern.RandomAccess &&
+                    MemoryMappedFilePool.ShouldUseMemoryMapping(contentLength, pattern))
+                {
+                    var lastModified = System.IO.File.GetLastWriteTimeUtc(physicalPath);
+                    var mappedStream = MemoryMappedFilePool.Instance.GetMappedRangeStream(
+                        physicalPath, contentLength, lastModified, offset, length);
+
+                    if (mappedStream != null)
+                    {
+                        await using (mappedStream)
+                        {
+                            // Use adaptive buffer size based on throughput
+                            var bufferSize = isInitialRange
+                                ? rangeSettings.BufferSize
+                                : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
+                            await mappedStream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+                        }
+
+                        // Record initial range served for priority tracking
+                        if (isInitialRange)
+                        {
+                            InitialRangePrioritizer.Instance.RecordInitialRangeServed(filePath, offset, length);
+                        }
+                        return;
+                    }
+                }
+
+                if (responseBodyFeature != null)
+                {
+                    // Zero-copy range transfer - kernel handles seeking
+                    await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    // Fallback: open stream with pattern-based hint
+                    await using var stream = OptimizedFileStream.OpenForRead(physicalPath, pattern);
+                    stream.Seek(offset, SeekOrigin.Begin);
+                    var bufferSize = isInitialRange
+                        ? rangeSettings.BufferSize
+                        : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
+                    await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+                }
+
+                // Record initial range served for priority tracking
+                if (isInitialRange)
+                {
+                    InitialRangePrioritizer.Instance.RecordInitialRangeServed(filePath, offset, length);
                 }
             }
-
-            if (responseBodyFeature != null)
+            finally
             {
-                // Zero-copy range transfer - kernel handles seeking
-                await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                // Fallback: open stream with pattern-based hint
-                await using var stream = OptimizedFileStream.OpenForRead(physicalPath, pattern);
-                stream.Seek(offset, SeekOrigin.Begin);
-                var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, pattern);
-                await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+                prioritySlot?.Dispose();
             }
             return;
         }
@@ -275,6 +330,10 @@ internal class GetHandler : RequestHandler
         // Full file transfer using SendFileAsync (zero-copy)
         Context.SetResult(DavStatusCode.Ok);
         Context.Response.ContentLength = contentLength;
+
+        // OPTIMIZATION: Preload file metadata cache for subsequent requests
+        var filePathForCache = Item?.Uri.AbsolutePath ?? string.Empty;
+        FileMetadataCache.Instance.Preload(physicalPath);
 
         if (responseBodyFeature != null)
         {
@@ -284,7 +343,7 @@ internal class GetHandler : RequestHandler
         {
             // Fallback: open stream with Sequential hint for read-ahead
             await using var stream = OptimizedFileStream.OpenForSequentialRead(physicalPath);
-            var bufferSize = OptimizedFileStream.GetOptimalBufferSize(contentLength, FileAccessPattern.Sequential);
+            var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(filePathForCache);
             await stream.CopyToPooledAsync(Context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -361,12 +420,22 @@ internal class GetHandler : RequestHandler
         var (pattern, prefetchHint) = SeekPatternTracker.Instance.RecordAccessWithPrefetch(
             filePath, offset, length, streamLength);
 
+        // OPTIMIZATION: Check if this is an initial range for priority handling
+        var isInitialRange = InitialRangePrioritizer.Instance.IsInitialRange(offset);
+        var rangeSettings = InitialRangePrioritizer.Instance.GetSettings(offset, length);
+
         // Queue background prefetch for predicted next request (if physical path available)
         var physicalFile = Item as IPhysicalFileInfo;
         if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3 &&
             !string.IsNullOrEmpty(physicalFile?.PhysicalPath))
         {
-            PrefetchService.Instance.QueuePrefetch(physicalFile.PhysicalPath, prefetchHint.Value);
+            // Use adaptive prefetch sizing based on throughput
+            var adaptivePrefetchSize = AdaptivePrefetch.Instance.GetOptimalPrefetchSize(filePath, streamLength);
+            var adjustedHint = new PrefetchHint(
+                prefetchHint.Value.PredictedOffset,
+                Math.Max(prefetchHint.Value.PrefetchSize, adaptivePrefetchSize),
+                prefetchHint.Value.Confidence);
+            PrefetchService.Instance.QueuePrefetch(physicalFile.PhysicalPath, adjustedHint);
         }
 
         // Seek to the start position
@@ -380,9 +449,18 @@ internal class GetHandler : RequestHandler
         // OPTIMIZATION: Flush headers immediately for fast seek response
         await context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // Use buffer size based on detected access pattern
-        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(length, pattern);
+        // OPTIMIZATION: Use appropriate buffer size based on range type and throughput
+        var bufferSize = isInitialRange
+            ? rangeSettings.BufferSize
+            : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
+
         await stream.CopyToPooledAsync(context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
+
+        // Record initial range served for priority tracking
+        if (isInitialRange)
+        {
+            InitialRangePrioritizer.Instance.RecordInitialRangeServed(filePath, offset, length);
+        }
     }
 
     /// <summary>
