@@ -62,18 +62,28 @@ internal static class UriHelper
             return cachedUri!;
 
         // Use AbsolutePath (encoded) to preserve proper encoding
-        var encodedBasePath = basePath;
-        if (!encodedBasePath.EndsWith('/'))
-            encodedBasePath = string.Concat(encodedBasePath, "/");
-
         // The path parameter is typically a decoded item name, so we need to encode it
         // to prevent special characters like # from being interpreted as URI delimiters
         var trimmedPath = path.AsSpan().TrimStart('/');
         var encodedPath = Uri.EscapeDataString(trimmedPath.ToString());
 
-        var result = new Uri(string.Concat(encodedBasePath, encodedPath));
-        CombineCache.Set(cacheKey, result);
-        return result;
+        // Use StringBuilder for efficient concatenation
+        var sb = StringBuilderPool.Rent();
+        try
+        {
+            sb.Append(basePath);
+            if (!basePath.EndsWith('/'))
+                sb.Append('/');
+            sb.Append(encodedPath);
+
+            var result = new Uri(sb.ToString());
+            CombineCache.Set(cacheKey, result);
+            return result;
+        }
+        finally
+        {
+            StringBuilderPool.Return(sb);
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

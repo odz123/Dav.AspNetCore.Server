@@ -42,32 +42,34 @@ public class IfHeaderValue
     public static bool TryParse(string? input, [NotNullWhen(true)] out IfHeaderValue? parsedValue)
     {
         parsedValue = null;
-        
+
         if (string.IsNullOrWhiteSpace(input))
             return false;
-        
+
         // we either start with a tagged list or an untagged list
         // the untagged list will always refer to the requested resource while
         // an tagged list specifies arbitrary resources to match.
 
+        var inputSpan = input.AsSpan();
         var currentResourceTag = string.Empty;
         var resources = new List<ResourceTag>();
         var conditions = new List<Condition>();
         var stateTokens = new List<IfHeaderValueStateToken>();
         var tags = new List<IfHeaderValueEntityTag>();
 
-        for (var i = 0; i < input.Length; i++)
+        for (var i = 0; i < inputSpan.Length; i++)
         {
-            if (input[i] == ' ')
+            if (inputSpan[i] == ' ')
                 continue;
-            
-            if (input[i] == '<')
+
+            if (inputSpan[i] == '<')
             {
-                var closingIndex = input.IndexOf('>', i);
+                var closingIndex = inputSpan.Slice(i).IndexOf('>');
                 if (closingIndex < 0)
                     return false;
-                
-                var resourceTag = input.Substring(i + 1, closingIndex - i - 1);
+                closingIndex += i; // Adjust for slice offset
+
+                var resourceTag = inputSpan.Slice(i + 1, closingIndex - i - 1).ToString();
 
                 if (!string.IsNullOrWhiteSpace(currentResourceTag))
                 {
@@ -81,29 +83,31 @@ public class IfHeaderValue
                 continue;
             }
 
-            if (input[i] == '(')
+            if (inputSpan[i] == '(')
             {
-                var closingIndex = input.IndexOf(')', i);
+                var closingIndex = inputSpan.Slice(i).IndexOf(')');
                 if (closingIndex < 0)
                     return false;
-                
-                var conditionList = input.Substring(i + 1, closingIndex - i - 1);
+                closingIndex += i; // Adjust for slice offset
+
+                var conditionSpan = inputSpan.Slice(i + 1, closingIndex - i - 1);
 
                 var negate = false;
-                for (var j = 0; j < conditionList.Length; j++)
+                for (var j = 0; j < conditionSpan.Length; j++)
                 {
-                    if (conditionList[j] == ' ')
+                    if (conditionSpan[j] == ' ')
                         continue;
 
                     // state token
-                    if (conditionList[j] == '<')
+                    if (conditionSpan[j] == '<')
                     {
-                        var closeStateTokenIndex = conditionList.IndexOf('>', j);
+                        var closeStateTokenIndex = conditionSpan.Slice(j).IndexOf('>');
                         if (closeStateTokenIndex < 0)
                             return false;
-                        
-                        var stateToken = conditionList.Substring(j + 1, closeStateTokenIndex - j - 1);
-                        
+                        closeStateTokenIndex += j; // Adjust for slice offset
+
+                        var stateToken = conditionSpan.Slice(j + 1, closeStateTokenIndex - j - 1).ToString();
+
                         stateTokens.Add(new IfHeaderValueStateToken(stateToken, negate));
 
                         negate = false;
@@ -111,38 +115,39 @@ public class IfHeaderValue
                         continue;
                     }
 
-                    // not
-                    if (conditionList[j] == 'N')
+                    // not - use direct character comparison instead of Substring
+                    if ((conditionSpan[j] == 'N' || conditionSpan[j] == 'n') &&
+                        conditionSpan.Length >= j + 3)
                     {
-                        if (conditionList.Length < j + 3)
-                            return false;
-
-                        if (!conditionList.Substring(j, 3).Equals("NOT", StringComparison.InvariantCultureIgnoreCase))
-                            return false;
-
-                        negate = true;
-
-                        // Move to the last character of "NOT" (j+2), loop will increment to j+3
-                        j += 2;
-                        continue;
+                        var notSpan = conditionSpan.Slice(j, 3);
+                        if (notSpan.Equals("NOT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            negate = true;
+                            // Move to the last character of "NOT" (j+2), loop will increment to j+3
+                            j += 2;
+                            continue;
+                        }
                     }
-                    
+
                     // etag
-                    if (conditionList[j] == '[')
+                    if (conditionSpan[j] == '[')
                     {
-                        var closingEtagIndex = conditionList.IndexOf(']', j);
+                        var closingEtagIndex = conditionSpan.Slice(j).IndexOf(']');
                         if (closingEtagIndex < 0)
                             return false;
-                        
-                        var etag = conditionList.Substring(j + 1, closingEtagIndex - j - 1);
-                        if (!etag.EndsWith("\"") || (!etag.StartsWith("\"") && !etag.StartsWith("W/\"")))
+                        closingEtagIndex += j; // Adjust for slice offset
+
+                        var etagSpan = conditionSpan.Slice(j + 1, closingEtagIndex - j - 1);
+                        if (!etagSpan.EndsWith("\"") || (!etagSpan.StartsWith("\"") && !etagSpan.StartsWith("W/\"")))
                             return false;
-                        
-                        var isWeak = etag.StartsWith("W/");
-                        var etagValue = isWeak ? etag.Substring(3, etag.Length - 4) : etag.Substring(1, etag.Length - 2);
-                        
+
+                        var isWeak = etagSpan.StartsWith("W/");
+                        var etagValue = isWeak
+                            ? etagSpan.Slice(3, etagSpan.Length - 4).ToString()
+                            : etagSpan.Slice(1, etagSpan.Length - 2).ToString();
+
                         tags.Add(new IfHeaderValueEntityTag(etagValue, isWeak, negate));
-                        
+
                         negate = false;
                         j = closingEtagIndex;
                         continue;
@@ -154,10 +159,10 @@ public class IfHeaderValue
                 conditions.Add(new Condition(
                     stateTokens.ToArray(),
                     tags.ToArray()));
-                
+
                 stateTokens.Clear();
                 tags.Clear();
-                
+
                 i = closingIndex;
                 continue;
             }
@@ -168,7 +173,7 @@ public class IfHeaderValue
         if (resources.All(x => x.Name != currentResourceTag))
             resources.Add(new ResourceTag(currentResourceTag, conditions.ToArray()));
 
-        var resourceConditions = new List<IfHeaderValueCondition>();
+        var resourceConditions = new List<IfHeaderValueCondition>(resources.Count * 2);
         foreach (var resourceTag in resources)
         foreach (var condition in resourceTag.Conditions)
             resourceConditions.Add(new IfHeaderValueCondition(string.IsNullOrWhiteSpace(resourceTag.Name) ? null : new Uri(resourceTag.Name.TrimEnd('/')), condition.Tokens, condition.Tags));

@@ -121,27 +121,30 @@ internal class PropFindHandler : RequestHandler
     }
 
     private static async Task AddItemsRecursive(
-        IStoreCollection collection, 
+        IStoreCollection collection,
         Depth depth,
         int iteration,
         ICollection<IStoreItem> results,
         CancellationToken cancellationToken = default)
     {
         results.Add(collection);
-        
+
         if (iteration >= (int)depth && depth != Depth.Infinity)
             return;
-        
+
         var items = await collection.GetItemsAsync(cancellationToken);
-        var collections = items.OfType<IStoreCollection>().ToList();
-        foreach (var subCollection in collections)
+
+        // Single pass: process collections recursively, add non-collections directly
+        foreach (var item in items)
         {
-            await AddItemsRecursive(subCollection, depth, iteration + 1, results, cancellationToken);
-        }
-        
-        foreach (var item in items.Except(collections))
-        {
-            results.Add(item);
+            if (item is IStoreCollection subCollection)
+            {
+                await AddItemsRecursive(subCollection, depth, iteration + 1, results, cancellationToken);
+            }
+            else
+            {
+                results.Add(item);
+            }
         }
     }
 
@@ -157,10 +160,11 @@ internal class PropFindHandler : RequestHandler
         }
 
         var propertyValues = new Dictionary<XName, PropertyResult>();
-        var properties = new List<XName>();
+        // Use HashSet for O(1) lookup instead of List with All() O(n) check
+        var properties = new HashSet<XName>();
 
         // add all non-expensive properties
-        if (request.AllProperties) 
+        if (request.AllProperties)
         {
             var propertyNames = await PropertyManager.GetPropertyNamesAsync(item, cancellationToken);
             foreach (var propertyName in propertyNames)
@@ -172,12 +176,12 @@ internal class PropFindHandler : RequestHandler
         }
 
         // this will also contain properties which are included explicitly
+        // HashSet.Add returns false if already exists, so no need for Contains check
         foreach (var propertyName in request.Properties)
         {
-            if (properties.All(x => x != propertyName))
-                properties.Add(propertyName);
+            properties.Add(propertyName);
         }
-        
+
         foreach (var propertyName in properties)
         {
             try
@@ -213,25 +217,38 @@ internal class PropFindHandler : RequestHandler
                 false,
                 true);
         }
-        
-        var properties = propfind.Element(XmlNames.Property)?.Elements().ToList() ?? new List<XElement>();
+
+        var propElement = propfind.Element(XmlNames.Property);
         var allProp = propfind.Element(XmlNames.AllProperties);
         var propNames = propfind.Element(XmlNames.PropertyName);
-
         var include = propfind.Element(XmlNames.Include);
+
+        // Collect property names directly into array to avoid intermediate allocations
+        var propertyNames = new List<XName>();
+        if (propElement != null)
+        {
+            foreach (var element in propElement.Elements())
+            {
+                propertyNames.Add(element.Name);
+            }
+        }
+
         if (include != null)
         {
-            properties.AddRange(include.Elements());
+            foreach (var element in include.Elements())
+            {
+                propertyNames.Add(element.Name);
+            }
         }
 
         return new PropFindRequest(
-            properties.Select(x => x.Name).ToList(),
+            propertyNames.Count > 0 ? propertyNames.ToArray() : Array.Empty<XName>(),
             propNames != null,
             allProp != null);
     }
 
     private record PropFindRequest(
-        IEnumerable<XName> Properties,
+        IReadOnlyList<XName> Properties,
         bool OnlyPropertyNames,
         bool AllProperties);
 }
