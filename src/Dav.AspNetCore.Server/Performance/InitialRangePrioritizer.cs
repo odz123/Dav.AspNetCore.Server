@@ -107,6 +107,7 @@ internal sealed class InitialRangePrioritizer
 
     /// <summary>
     /// Gets recommended settings for an initial range request.
+    /// Optimized for fast TTFB while maintaining good throughput.
     /// </summary>
     /// <param name="offset">The range offset.</param>
     /// <param name="length">The range length.</param>
@@ -115,18 +116,37 @@ internal sealed class InitialRangePrioritizer
     {
         if (offset < InitialRangeThreshold)
         {
-            // Initial range: use smaller buffers for faster first byte
+            // Initial range: use optimized buffers based on request size
+            // For very small initial requests (< 64KB), use smaller buffers for fastest TTFB
+            // For larger initial requests, use larger buffers for better throughput
+            var bufferSize = length <= 64 * 1024
+                ? 16 * 1024   // 16KB - ultra-fast TTFB for small initial reads
+                : length <= 256 * 1024
+                    ? 32 * 1024   // 32KB - fast TTFB for medium initial reads
+                    : 64 * 1024;  // 64KB - balanced for larger initial reads
+
             return new InitialRangeSettings(
-                bufferSize: 32 * 1024,  // 32KB - fast TTFB
+                bufferSize: bufferSize,
                 useAsyncFlush: true,
                 disableOutputBuffering: true,
-                readAheadSize: length * 2  // Prefetch next chunk
+                readAheadSize: Math.Min(length * 2, 2 * 1024 * 1024)  // Prefetch next chunk (up to 2MB)
             );
         }
 
-        // Normal range
+        // For ranges just past the initial threshold, still use moderate optimizations
+        if (offset < InitialRangeThreshold * 2)
+        {
+            return new InitialRangeSettings(
+                bufferSize: 64 * 1024,  // 64KB
+                useAsyncFlush: true,
+                disableOutputBuffering: true,
+                readAheadSize: length  // Prefetch next chunk
+            );
+        }
+
+        // Normal range - use adaptive buffer size based on throughput
         return new InitialRangeSettings(
-            bufferSize: 64 * 1024,  // 64KB
+            bufferSize: 128 * 1024,  // 128KB for better throughput
             useAsyncFlush: false,
             disableOutputBuffering: false,
             readAheadSize: 0
