@@ -23,9 +23,21 @@ internal static class LinuxKernelHints
     private const int MADV_SEQUENTIAL = 2;
     private const int MADV_WILLNEED = 3;
     private const int MADV_DONTNEED = 4;
+    private const int MADV_FREE = 8;
+    private const int MADV_HUGEPAGE = 14;
+    private const int MADV_NOHUGEPAGE = 15;
+    private const int MADV_COLD = 20;
+    private const int MADV_PAGEOUT = 21;
+    private const int MADV_POPULATE_READ = 22;  // Linux 5.14+ - pre-fault pages for reading
+
+    // readahead syscall for aggressive prefetching
+    private const int SYS_readahead = 187; // x86_64
 
     // Cached check for Linux platform
     private static readonly bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+
+    // Cached kernel version check for advanced features
+    private static readonly Lazy<bool> HasAdvancedMadvise = new(CheckAdvancedMadvise);
 
     /// <summary>
     /// Advises the kernel that we will need the specified file range soon.
@@ -241,11 +253,248 @@ internal static class LinuxKernelHints
     [DllImport("libc", EntryPoint = "posix_fadvise", SetLastError = true)]
     private static extern int posix_fadvise(int fd, long offset, long len, int advice);
 
+    // P/Invoke for madvise (memory-mapped file hints)
+    [DllImport("libc", EntryPoint = "madvise", SetLastError = true)]
+    private static extern int madvise(IntPtr addr, nuint length, int advice);
+
+    // P/Invoke for readahead (aggressive prefetching)
+    [DllImport("libc", EntryPoint = "readahead", SetLastError = true)]
+    private static extern int readahead(int fd, long offset, nuint count);
+
     private static void PosixFadvise(int fd, long offset, long length, int advice)
     {
         if (IsLinux)
         {
             posix_fadvise(fd, offset, length, advice);
+        }
+    }
+
+    private static bool CheckAdvancedMadvise()
+    {
+        if (!IsLinux)
+            return false;
+
+        try
+        {
+            // Check if we're on Linux 5.14+ for MADV_POPULATE_READ
+            if (File.Exists("/proc/version"))
+            {
+                var versionLine = File.ReadAllText("/proc/version");
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    versionLine, @"Linux version (\d+)\.(\d+)");
+                if (match.Success)
+                {
+                    var major = int.Parse(match.Groups[1].Value);
+                    var minor = int.Parse(match.Groups[2].Value);
+                    return major > 5 || (major == 5 && minor >= 14);
+                }
+            }
+        }
+        catch
+        {
+            // Ignore
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Applies madvise hint for a memory-mapped region.
+    /// Use for memory-mapped files to optimize kernel page management.
+    /// </summary>
+    /// <param name="address">The memory address.</param>
+    /// <param name="length">Length of the region.</param>
+    /// <param name="pattern">Expected access pattern.</param>
+    public static void ApplyMadvise(IntPtr address, long length, FileAccessPattern pattern)
+    {
+        if (!IsLinux || address == IntPtr.Zero || length <= 0)
+            return;
+
+        try
+        {
+            var advice = pattern switch
+            {
+                FileAccessPattern.Sequential => MADV_SEQUENTIAL,
+                FileAccessPattern.RandomAccess => MADV_RANDOM,
+                _ => MADV_NORMAL
+            };
+
+            madvise(address, (nuint)length, advice);
+        }
+        catch
+        {
+            // Non-critical
+        }
+    }
+
+    /// <summary>
+    /// Pre-faults pages into memory for a memory-mapped region.
+    /// Use MADV_WILLNEED to bring pages into cache before they're accessed.
+    /// </summary>
+    /// <param name="address">The memory address.</param>
+    /// <param name="length">Length of the region to prefetch.</param>
+    public static void MadviseWillNeed(IntPtr address, long length)
+    {
+        if (!IsLinux || address == IntPtr.Zero || length <= 0)
+            return;
+
+        try
+        {
+            madvise(address, (nuint)length, MADV_WILLNEED);
+        }
+        catch
+        {
+            // Non-critical
+        }
+    }
+
+    /// <summary>
+    /// Requests huge pages for a memory-mapped region.
+    /// Huge pages reduce TLB pressure for large files, improving performance.
+    /// </summary>
+    /// <param name="address">The memory address.</param>
+    /// <param name="length">Length of the region.</param>
+    public static void MadviseHugePage(IntPtr address, long length)
+    {
+        if (!IsLinux || address == IntPtr.Zero || length <= 0)
+            return;
+
+        try
+        {
+            madvise(address, (nuint)length, MADV_HUGEPAGE);
+        }
+        catch
+        {
+            // May fail if huge pages aren't available - non-critical
+        }
+    }
+
+    /// <summary>
+    /// Pre-faults pages using MADV_POPULATE_READ (Linux 5.14+).
+    /// This is more aggressive than MADV_WILLNEED and guarantees pages are populated.
+    /// </summary>
+    /// <param name="address">The memory address.</param>
+    /// <param name="length">Length of the region.</param>
+    /// <returns>True if successful, false if not supported or failed.</returns>
+    public static bool MadvisePopulateRead(IntPtr address, long length)
+    {
+        if (!IsLinux || !HasAdvancedMadvise.Value || address == IntPtr.Zero || length <= 0)
+            return false;
+
+        try
+        {
+            var result = madvise(address, (nuint)length, MADV_POPULATE_READ);
+            return result == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Performs aggressive readahead using the readahead() syscall.
+    /// This is more aggressive than posix_fadvise WILLNEED.
+    /// </summary>
+    /// <param name="fd">File descriptor.</param>
+    /// <param name="offset">Starting offset.</param>
+    /// <param name="length">Length to read ahead.</param>
+    public static void AggressiveReadahead(int fd, long offset, long length)
+    {
+        if (!IsLinux || fd < 0 || length <= 0)
+            return;
+
+        try
+        {
+            // Cap at 32MB per call to avoid overwhelming the I/O scheduler
+            const long maxReadahead = 32 * 1024 * 1024;
+            var remaining = length;
+            var currentOffset = offset;
+
+            while (remaining > 0)
+            {
+                var chunkSize = Math.Min(remaining, maxReadahead);
+                readahead(fd, currentOffset, (nuint)chunkSize);
+                currentOffset += chunkSize;
+                remaining -= chunkSize;
+            }
+        }
+        catch
+        {
+            // Non-critical
+        }
+    }
+
+    /// <summary>
+    /// Applies optimal hints for NZB/video streaming.
+    /// Combines multiple techniques for maximum prefetching efficiency.
+    /// </summary>
+    /// <param name="stream">The file stream.</param>
+    /// <param name="offset">Starting offset.</param>
+    /// <param name="requestedLength">Requested read length.</param>
+    /// <param name="fileSize">Total file size.</param>
+    public static void ApplyStreamingHintsAggressive(
+        FileStream stream,
+        long offset,
+        long requestedLength,
+        long fileSize)
+    {
+        if (!IsLinux)
+            return;
+
+        var fd = GetFileDescriptor(stream);
+        if (fd < 0)
+            return;
+
+        try
+        {
+            // For initial reads (first 2MB), be extra aggressive
+            if (offset < 2 * 1024 * 1024)
+            {
+                // Prefetch first 8MB for fast initial response
+                var prefetchLength = Math.Min(8 * 1024 * 1024, fileSize);
+                AdviseSequential(fd, 0, prefetchLength);
+                AggressiveReadahead(fd, 0, prefetchLength);
+            }
+            else
+            {
+                // Sequential hint for current region
+                AdviseSequential(fd, offset, requestedLength);
+
+                // Aggressive read-ahead for next chunks
+                var readAheadStart = offset + requestedLength;
+                var readAheadLength = Math.Min(4 * 1024 * 1024, fileSize - readAheadStart);
+                if (readAheadLength > 0)
+                {
+                    AggressiveReadahead(fd, readAheadStart, readAheadLength);
+                }
+            }
+        }
+        catch
+        {
+            // Non-critical
+        }
+    }
+
+    /// <summary>
+    /// Marks a range as no longer needed to free cache space.
+    /// Useful after streaming a large segment that won't be re-read.
+    /// </summary>
+    /// <param name="fd">File descriptor.</param>
+    /// <param name="offset">Starting offset.</param>
+    /// <param name="length">Length of the range.</param>
+    public static void ReleaseStreamedRange(int fd, long offset, long length)
+    {
+        if (!IsLinux || fd < 0)
+            return;
+
+        try
+        {
+            // Tell the kernel this range is no longer needed
+            PosixFadvise(fd, offset, length, POSIX_FADV_DONTNEED);
+        }
+        catch
+        {
+            // Non-critical
         }
     }
 }
