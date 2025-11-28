@@ -129,6 +129,23 @@ public abstract class FileStore : IStore
 
     public abstract ValueTask<Stream> OpenFileStreamAsync(Uri uri, OpenFileMode mode, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Opens a file stream with optimized settings for the specified access pattern.
+    /// Override this method to provide optimized file I/O for streaming scenarios.
+    /// </summary>
+    /// <param name="uri">The file URI.</param>
+    /// <param name="accessPattern">The expected access pattern (sequential or random).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>An optimized readable stream.</returns>
+    public virtual ValueTask<Stream> OpenOptimizedReadStreamAsync(
+        Uri uri,
+        Performance.FileAccessPattern accessPattern,
+        CancellationToken cancellationToken = default)
+    {
+        // Default implementation falls back to regular file opening
+        return OpenFileStreamAsync(uri, OpenFileMode.Read, cancellationToken);
+    }
+
     public abstract ValueTask CreateDirectoryAsync(Uri uri, CancellationToken cancellationToken);
 
     public abstract ValueTask<Uri[]> GetFilesAsync(Uri uri, CancellationToken cancellationToken);

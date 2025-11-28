@@ -5,7 +5,7 @@ using Dav.AspNetCore.Server.Store.Properties;
 
 namespace Dav.AspNetCore.Server.Store.Files;
 
-public class File : IStoreItem, IPhysicalFileInfo
+public class File : IStoreItem, IPhysicalFileInfo, IOptimizedStreamable
 {
     private readonly FileStore store;
     private readonly FileProperties properties;
@@ -56,12 +56,34 @@ public class File : IStoreItem, IPhysicalFileInfo
     public bool HasPhysicalPath => !string.IsNullOrEmpty(PhysicalPath);
 
     /// <summary>
+    /// Gets the file length without opening a stream.
+    /// </summary>
+    public long Length => properties.Length;
+
+    /// <summary>
+    /// Gets the last modification time without opening a stream.
+    /// </summary>
+    public DateTime LastModified => properties.LastModified;
+
+    /// <summary>
     /// Gets a readable stream async.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The readable stream.</returns>
     public async Task<Stream> GetReadableStreamAsync(CancellationToken cancellationToken = default)
         => await store.OpenFileStreamAsync(properties.Uri, OpenFileMode.Read, cancellationToken);
+
+    /// <summary>
+    /// Gets a readable stream optimized for the specified access pattern.
+    /// Uses OS-level hints like SequentialScan for streaming and RandomAccess for seeking.
+    /// </summary>
+    /// <param name="accessPattern">The expected access pattern.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>An optimized readable stream.</returns>
+    public async Task<Stream> GetOptimizedReadableStreamAsync(
+        Performance.FileAccessPattern accessPattern,
+        CancellationToken cancellationToken = default)
+        => await store.OpenOptimizedReadStreamAsync(properties.Uri, accessPattern, cancellationToken);
 
     /// <summary>
     /// Sets the data from the given stream async.
