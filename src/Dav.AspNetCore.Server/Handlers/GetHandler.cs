@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Xml.Linq;
 using Dav.AspNetCore.Server.Http;
@@ -76,9 +77,20 @@ internal class GetHandler : RequestHandler
             ? FileAccessPattern.RandomAccess
             : FileAccessPattern.Sequential;
 
+        // OPTIMIZATION: Apply socket-level tuning for streaming performance
+        var isInitialRangeForTuning = hasRangeRequest &&
+            requestHeaders.Range!.Ranges.First().From.GetValueOrDefault(0) < InitialRangePrioritizer.InitialRangeThreshold;
+        StreamingConnectionTuner.TuneForStreaming(Context, contentLength, isInitialRangeForTuning);
+
         // OPTIMIZATION: For physical files with SendFile support, use zero-copy transfer
         if (hasPhysicalPath && !disableRanges)
         {
+            // Notify speculative prefetcher about stream start for full file downloads
+            if (!hasRangeRequest && contentLength > 0)
+            {
+                SpeculativeSegmentPrefetcher.Instance.OnStreamStart(physicalPath!, contentLength);
+            }
+
             await SendFileZeroCopyAsync(physicalPath!, contentLength, hasRangeRequest, cancellationToken);
             return;
         }
@@ -202,6 +214,7 @@ internal class GetHandler : RequestHandler
     {
         var requestHeaders = Context.Request.GetTypedHeaders();
         var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
+        var sw = Stopwatch.StartNew();
 
         Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
         AddStreamingHeaders(Context, Context.Response.ContentType, contentLength);
@@ -235,9 +248,14 @@ internal class GetHandler : RequestHandler
                 // OPTIMIZATION: For initial ranges, use smaller buffers for faster TTFB
                 var rangeSettings = InitialRangePrioritizer.Instance.GetSettings(offset, length);
 
+                // OPTIMIZATION: Trigger parallel chunk prefetch for initial ranges
+                if (isInitialRange)
+                {
+                    ParallelChunkPrefetcher.Instance.TriggerInitialPrefetch(physicalPath, contentLength);
+                }
+
                 // OPTIMIZATION: For sequential patterns, consider coalescing reads for efficiency
                 var shouldCoalesce = RangeCoalescer.Instance.ShouldUseReadAhead(filePath);
-                long actualReadLength = length;
 
                 if (shouldCoalesce && !isInitialRange && pattern == FileAccessPattern.Sequential)
                 {
@@ -261,6 +279,12 @@ internal class GetHandler : RequestHandler
                         Math.Max(prefetchHint.Value.PrefetchSize, adaptivePrefetchSize),
                         prefetchHint.Value.Confidence);
                     PrefetchService.Instance.QueuePrefetch(physicalPath, adjustedHint);
+                }
+
+                // OPTIMIZATION: Use Linux kernel hints to prefetch data ahead of time
+                if (LinuxKernelHints.IsAvailable)
+                {
+                    LinuxKernelHints.PrefetchFileRange(physicalPath, offset, Math.Min(length * 2, 4 * 1024 * 1024));
                 }
 
                 Context.SetResult(DavStatusCode.PartialContent);
@@ -289,6 +313,11 @@ internal class GetHandler : RequestHandler
                             await mappedStream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
                         }
 
+                        // Record throughput for adaptive prefetching
+                        sw.Stop();
+                        AdaptivePrefetch.Instance.RecordThroughput(filePath, length, sw.ElapsedMilliseconds);
+                        SpeculativeSegmentPrefetcher.Instance.OnReadComplete(physicalPath, offset, length, contentLength, sw.ElapsedMilliseconds);
+
                         // Record initial range served for priority tracking
                         if (isInitialRange)
                         {
@@ -307,12 +336,24 @@ internal class GetHandler : RequestHandler
                 {
                     // Fallback: open stream with pattern-based hint
                     await using var stream = OptimizedFileStream.OpenForRead(physicalPath, pattern);
+
+                    // OPTIMIZATION: Apply Linux kernel hints
+                    if (LinuxKernelHints.IsAvailable)
+                    {
+                        LinuxKernelHints.ApplyStreamingHints(stream, pattern, offset, length);
+                    }
+
                     stream.Seek(offset, SeekOrigin.Begin);
                     var bufferSize = isInitialRange
                         ? rangeSettings.BufferSize
                         : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
                     await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
                 }
+
+                // Record throughput for adaptive prefetching
+                sw.Stop();
+                AdaptivePrefetch.Instance.RecordThroughput(filePath, length, sw.ElapsedMilliseconds);
+                SpeculativeSegmentPrefetcher.Instance.OnReadComplete(physicalPath, offset, length, contentLength, sw.ElapsedMilliseconds);
 
                 // Record initial range served for priority tracking
                 if (isInitialRange)
@@ -335,6 +376,15 @@ internal class GetHandler : RequestHandler
         var filePathForCache = Item?.Uri.AbsolutePath ?? string.Empty;
         FileMetadataCache.Instance.Preload(physicalPath);
 
+        // OPTIMIZATION: Apply Linux kernel hints for sequential read
+        if (LinuxKernelHints.IsAvailable)
+        {
+            LinuxKernelHints.PrefetchFileRange(physicalPath, 0, Math.Min(contentLength, 8 * 1024 * 1024));
+        }
+
+        // OPTIMIZATION: Flush headers early for faster TTFB
+        await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
         if (responseBodyFeature != null)
         {
             await responseBodyFeature.SendFileAsync(physicalPath, 0, contentLength > 0 ? contentLength : null, cancellationToken).ConfigureAwait(false);
@@ -343,9 +393,20 @@ internal class GetHandler : RequestHandler
         {
             // Fallback: open stream with Sequential hint for read-ahead
             await using var stream = OptimizedFileStream.OpenForSequentialRead(physicalPath);
+
+            // OPTIMIZATION: Apply Linux kernel hints
+            if (LinuxKernelHints.IsAvailable)
+            {
+                LinuxKernelHints.ApplyStreamingHints(stream, FileAccessPattern.Sequential, 0, contentLength);
+            }
+
             var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(filePathForCache);
             await stream.CopyToPooledAsync(Context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
         }
+
+        // Record throughput for adaptive prefetching
+        sw.Stop();
+        AdaptivePrefetch.Instance.RecordThroughput(filePathForCache, contentLength, sw.ElapsedMilliseconds);
     }
 
     /// <summary>
@@ -407,6 +468,7 @@ internal class GetHandler : RequestHandler
         var requestHeaders = context.Request.GetTypedHeaders();
         var range = requestHeaders.Range!.Ranges.First();
         var streamLength = stream.Length;
+        var sw = Stopwatch.StartNew();
 
         if (!TryCalculateRange(range, streamLength, out var offset, out var length))
         {
@@ -438,6 +500,12 @@ internal class GetHandler : RequestHandler
             PrefetchService.Instance.QueuePrefetch(physicalFile.PhysicalPath, adjustedHint);
         }
 
+        // OPTIMIZATION: Apply Linux kernel hints if stream is FileStream
+        if (LinuxKernelHints.IsAvailable && stream is FileStream fileStream)
+        {
+            LinuxKernelHints.ApplyStreamingHints(fileStream, pattern, offset, length);
+        }
+
         // Seek to the start position
         stream.Seek(offset, SeekOrigin.Begin);
 
@@ -456,6 +524,10 @@ internal class GetHandler : RequestHandler
 
         await stream.CopyToPooledAsync(context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
 
+        // Record throughput for adaptive prefetching
+        sw.Stop();
+        AdaptivePrefetch.Instance.RecordThroughput(filePath, length, sw.ElapsedMilliseconds);
+
         // Record initial range served for priority tracking
         if (isInitialRange)
         {
@@ -466,12 +538,15 @@ internal class GetHandler : RequestHandler
     /// <summary>
     /// Sends full file data from a stream.
     /// </summary>
-    private static async Task SendFullDataAsync(
+    private async Task SendFullDataAsync(
         HttpContext context,
         Stream stream,
         long contentLength,
         CancellationToken cancellationToken)
     {
+        var sw = Stopwatch.StartNew();
+        var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
+
         context.SetResult(DavStatusCode.Ok);
 
         if (stream.CanSeek)
@@ -485,6 +560,12 @@ internal class GetHandler : RequestHandler
         }
 
         AddStreamingHeaders(context, context.Response.ContentType, contentLength);
+
+        // OPTIMIZATION: Apply Linux kernel hints if stream is FileStream
+        if (LinuxKernelHints.IsAvailable && stream is FileStream fileStream)
+        {
+            LinuxKernelHints.ApplyStreamingHints(fileStream, FileAccessPattern.Sequential, 0, contentLength);
+        }
 
         // OPTIMIZATION: Flush headers immediately to reduce TTFB
         // This allows the client to start processing headers while we read the file
@@ -502,6 +583,10 @@ internal class GetHandler : RequestHandler
         {
             await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
         }
+
+        // Record throughput for adaptive prefetching
+        sw.Stop();
+        AdaptivePrefetch.Instance.RecordThroughput(filePath, contentLength, sw.ElapsedMilliseconds);
     }
 
     /// <summary>
