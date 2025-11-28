@@ -56,6 +56,35 @@ internal class GetHandler : RequestHandler
             contentLength = long.TryParse(contentLengthStr, out var len) ? len : -1L;
         }
 
+        // ULTRA-FAST PATH: Try instant response for hot files with physical paths
+        // This bypasses all property fetching for maximum TTFB reduction
+        if (hasPhysicalPath && contentLength > 0)
+        {
+            var streamingPrep = NzbStreamingOptimizer.Instance.PrepareForStreaming(
+                Context, physicalPath!, contentLength, hasRangeRequest);
+
+            if (streamingPrep.InstantEntry != null && streamingPrep.IsHotFile)
+            {
+                // Validate the instant entry hasn't expired
+                var instantEntry = streamingPrep.InstantEntry;
+                if (instantEntry.IsValid())
+                {
+                    // Handle HEAD request with instant response
+                    if (isHeadRequest)
+                    {
+                        instantEntry.ApplyHeaders(Context.Response);
+                        Context.SetResult(DavStatusCode.Ok);
+                        return;
+                    }
+
+                    // Handle GET with instant response path
+                    await HandleInstantResponseAsync(
+                        physicalPath!, instantEntry, hasRangeRequest, streamingPrep, cancellationToken);
+                    return;
+                }
+            }
+        }
+
         // Fetch essential properties in parallel
         var properties = await GetPropertiesParallelAsync(Item, cancellationToken);
 
@@ -134,6 +163,129 @@ internal class GetHandler : RequestHandler
                 await SendFullDataAsync(Context, readableStream, contentLength, cancellationToken);
             }
         }
+    }
+
+    /// <summary>
+    /// Handles requests using instant response path for hot files.
+    /// Achieves sub-millisecond TTFB by using pre-cached headers and optimized streaming.
+    /// </summary>
+    private async Task HandleInstantResponseAsync(
+        string physicalPath,
+        InstantResponseEntry instantEntry,
+        bool hasRangeRequest,
+        StreamingPreparation streamingPrep,
+        CancellationToken cancellationToken)
+    {
+        var requestHeaders = Context.Request.GetTypedHeaders();
+        var contentLength = instantEntry.ContentLength;
+        var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
+
+        // Apply pre-computed headers for instant response
+        Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
+
+        if (hasRangeRequest)
+        {
+            var range = requestHeaders.Range!.Ranges.First();
+
+            // Calculate range using cached content length
+            if (!TryCalculateRange(range, contentLength, out var offset, out var length))
+            {
+                Context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+                Context.Response.Headers["Content-Range"] = $"bytes */{contentLength}";
+                return;
+            }
+
+            // Record seek for pattern learning
+            NzbStreamingOptimizer.Instance.RecordSeek(Context, physicalPath, offset, length);
+
+            // Apply instant headers for range request
+            instantEntry.ApplyRangeHeaders(Context.Response, offset, length);
+            Context.SetResult(DavStatusCode.PartialContent);
+
+            // Flush headers immediately for fastest TTFB
+            await NzbStreamingOptimizer.Instance.FlushHeadersInstantAsync(Context, cancellationToken);
+
+            // Use optimal handle from cache if available
+            var handle = NzbStreamingOptimizer.Instance.GetOptimalHandle(physicalPath, FileAccessPattern.RandomAccess);
+            if (handle != null)
+            {
+                try
+                {
+                    // Apply kernel hints for the seek
+                    if (LinuxKernelHints.IsAvailable)
+                    {
+                        var fd = handle.FileDescriptor;
+                        if (fd >= 0)
+                        {
+                            LinuxKernelHints.AdviseWillNeed(fd, offset, length);
+                        }
+                    }
+
+                    var stream = handle.CreatePositionedStream(offset);
+                    var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(physicalPath);
+                    await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    handle.Dispose();
+                }
+            }
+            else if (responseBodyFeature != null)
+            {
+                // Fallback to SendFile
+                await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            // Full file transfer with instant headers
+            instantEntry.ApplyHeaders(Context.Response);
+            Context.SetResult(DavStatusCode.Ok);
+
+            // Notify prefetcher about stream start
+            SpeculativeSegmentPrefetcher.Instance.OnStreamStart(physicalPath, contentLength);
+
+            // Flush headers immediately
+            await NzbStreamingOptimizer.Instance.FlushHeadersInstantAsync(Context, cancellationToken);
+
+            // Use SendFile for zero-copy transfer
+            if (responseBodyFeature != null)
+            {
+                await responseBodyFeature.SendFileAsync(physicalPath, 0, contentLength, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                // Fallback to stream copy
+                var handle = NzbStreamingOptimizer.Instance.GetOptimalHandle(physicalPath, FileAccessPattern.Sequential);
+                if (handle != null)
+                {
+                    try
+                    {
+                        var stream = handle.Stream;
+                        var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(physicalPath);
+                        await stream.CopyToPooledPipelinedAsync(Context.Response.Body, bufferSize, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        handle.Dispose();
+                    }
+                }
+            }
+        }
+
+        // Record successful completion for learning
+        NzbStreamingOptimizer.Instance.RecordStreamComplete(
+            physicalPath,
+            contentLength,
+            instantEntry.ContentType,
+            instantEntry.ETagHeader?.Trim('"'),
+            instantEntry.LastModified,
+            contentLength,
+            0);
     }
 
     /// <summary>
