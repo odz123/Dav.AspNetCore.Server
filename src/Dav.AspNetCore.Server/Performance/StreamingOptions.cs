@@ -77,6 +77,27 @@ public class StreamingOptions
     public bool EnableRandomAccessHints { get; set; } = true;
 
     /// <summary>
+    /// When true, uses memory-mapped files for random access patterns.
+    /// Provides the fastest possible seeking for repeated access to the same file.
+    /// Default is false.
+    /// </summary>
+    public bool EnableMemoryMappedFiles { get; set; }
+
+    /// <summary>
+    /// When true, enables predictive prefetching based on access patterns.
+    /// Preloads predicted next ranges into OS cache for faster seeking.
+    /// Default is false.
+    /// </summary>
+    public bool EnablePrefetching { get; set; }
+
+    /// <summary>
+    /// When true, enables file metadata caching for faster initial responses.
+    /// Reduces I/O before first byte for improved TTFB.
+    /// Default is true for streaming scenarios.
+    /// </summary>
+    public bool EnableMetadataCache { get; set; } = true;
+
+    /// <summary>
     /// Applies the configuration to the static caches and pools.
     /// Call this during application startup.
     /// </summary>
@@ -98,6 +119,8 @@ public class StreamingOptions
     /// - Smaller buffers for range requests (seeking)
     /// - OS-level read-ahead hints
     /// - Zero-copy file transfers
+    /// - Memory-mapped files for random access
+    /// - Predictive prefetching for seek patterns
     /// </summary>
     public static StreamingOptions ForNzbStreaming() => new()
     {
@@ -105,9 +128,10 @@ public class StreamingOptions
         AlwaysUseFastETag = true,
         FastETagThreshold = 0,
 
-        // Aggressive buffering for streaming throughput
-        StreamingBufferThreshold = 10 * 1024 * 1024, // 10MB
-        StreamingBufferSize = 1024 * 1024, // 1MB buffers
+        // Lower threshold for earlier streaming mode activation
+        StreamingBufferThreshold = 5 * 1024 * 1024, // 5MB - start streaming optimizations earlier
+        StreamingBufferSize = 1024 * 1024, // 1MB buffers for throughput
+        LargeBufferSize = 512 * 1024, // 512KB for medium files
 
         // Enable all OS-level optimizations
         EnableSendFileOptimization = true,
@@ -116,7 +140,13 @@ public class StreamingOptions
 
         // Long-lived connections for streaming
         CacheControlMaxAge = 3600,
-        KeepAliveTimeout = 300
+        KeepAliveTimeout = 300,
+
+        // New: Enable memory-mapped files for fast seeking
+        EnableMemoryMappedFiles = true,
+
+        // New: Enable predictive prefetching
+        EnablePrefetching = true
     };
 
     /// <summary>
@@ -127,11 +157,15 @@ public class StreamingOptions
     {
         AlwaysUseFastETag = true,
         FastETagThreshold = 0,
-        StreamingBufferThreshold = 50 * 1024 * 1024, // 50MB
+        StreamingBufferThreshold = 10 * 1024 * 1024, // 10MB - lower for faster streaming mode
         StreamingBufferSize = 1024 * 1024, // 1MB
+        LargeBufferSize = 512 * 1024, // 512KB
         EnableSendFileOptimization = true,
         EnableReadAhead = true,
         EnableRandomAccessHints = true,
+        EnableMemoryMappedFiles = true,
+        EnablePrefetching = true,
+        EnableMetadataCache = true,
         CacheControlMaxAge = 86400, // 24 hours
         KeepAliveTimeout = 300
     };
@@ -173,9 +207,39 @@ public class StreamingOptions
         EnableSendFileOptimization = true,
         EnableReadAhead = false, // Disable for lower latency
         EnableRandomAccessHints = true,
+        EnableMetadataCache = true, // Critical for low latency
 
         // Shorter timeouts for faster error detection
         CacheControlMaxAge = 1800,
         KeepAliveTimeout = 60
+    };
+
+    /// <summary>
+    /// Creates a configuration for ultra-low latency NZB streaming.
+    /// Combines all optimizations for the absolute fastest stream starts and seeks.
+    /// </summary>
+    public static StreamingOptions ForUltraLowLatencyNzb() => new()
+    {
+        // Instant ETag responses
+        AlwaysUseFastETag = true,
+        FastETagThreshold = 0,
+
+        // Moderate buffers - balance between TTFB and throughput
+        StreamingBufferThreshold = 2 * 1024 * 1024, // 2MB - very early streaming mode
+        StreamingBufferSize = 512 * 1024, // 512KB - fast first byte, good throughput
+        LargeBufferSize = 256 * 1024, // 256KB
+        DefaultBufferSize = 128 * 1024, // 128KB
+
+        // Enable ALL optimizations
+        EnableSendFileOptimization = true,
+        EnableReadAhead = true,
+        EnableRandomAccessHints = true,
+        EnableMemoryMappedFiles = true,
+        EnablePrefetching = true,
+        EnableMetadataCache = true,
+
+        // Keep connections alive
+        CacheControlMaxAge = 3600,
+        KeepAliveTimeout = 300
     };
 }
