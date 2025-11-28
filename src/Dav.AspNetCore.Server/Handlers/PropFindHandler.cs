@@ -58,7 +58,7 @@ internal class PropFindHandler : RequestHandler
             var propertyResults = new ConcurrentDictionary<IStoreItem, Dictionary<XName, PropertyResult>>();
 
             // Fetch properties in parallel with limited concurrency
-            var semaphore = new SemaphoreSlim(MaxParallelism);
+            using var semaphore = new SemaphoreSlim(MaxParallelism);
             var tasks = items.Select(async item =>
             {
                 await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);

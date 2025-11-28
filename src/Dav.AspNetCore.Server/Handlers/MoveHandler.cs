@@ -158,7 +158,7 @@ internal class MoveHandler : RequestHandler
                 if (destinationMove == null)
                     throw new InvalidOperationException("If the copied item is a collection, the copy result must also be a collection.");
                 
-                var subItemName = subItem.Uri.GetRelativeUri(collectionToMove.Uri).LocalPath.Trim('/');
+                var subItemName = subItem.Uri.GetRelativeUri(collectionToMove.Uri).LocalPath.TrimStart('/');
                 var error = await MoveItemRecursiveAsync(collectionToMove, subItem, destinationMove, subItemName, errors, cancellationToken);
                 if (!error)
                     subItemError = true;
@@ -168,7 +168,7 @@ internal class MoveHandler : RequestHandler
                 return false;
         }
         
-        var itemName = item.Uri.GetRelativeUri(collection.Uri).LocalPath.Trim('/');
+        var itemName = item.Uri.GetRelativeUri(collection.Uri).LocalPath.TrimStart('/');
         var status = await collection.DeleteItemAsync(itemName, cancellationToken);
         if (status != DavStatusCode.NoContent)
         {
