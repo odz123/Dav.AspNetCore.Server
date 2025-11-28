@@ -82,6 +82,21 @@ internal class GetHandler : RequestHandler
             requestHeaders.Range!.Ranges.First().From.GetValueOrDefault(0) < InitialRangePrioritizer.InitialRangeThreshold;
         StreamingConnectionTuner.TuneForStreaming(Context, contentLength, isInitialRangeForTuning);
 
+        // OPTIMIZATION: Warmup connection for large transfers and apply ultra-low latency for initial ranges
+        if (contentLength > 10 * 1024 * 1024)
+        {
+            StreamingConnectionTuner.WarmupConnection(Context, contentLength);
+        }
+        else if (isInitialRangeForTuning)
+        {
+            // For initial range requests, apply ultra-low latency settings
+            var socket = GetSocketFromContext(Context);
+            if (socket != null)
+            {
+                StreamingConnectionTuner.ApplyUltraLowLatencySettings(socket);
+            }
+        }
+
         // OPTIMIZATION: For physical files with SendFile support, use zero-copy transfer
         if (hasPhysicalPath && !disableRanges)
         {
@@ -284,7 +299,15 @@ internal class GetHandler : RequestHandler
                 // OPTIMIZATION: Use Linux kernel hints to prefetch data ahead of time
                 if (LinuxKernelHints.IsAvailable)
                 {
-                    LinuxKernelHints.PrefetchFileRange(physicalPath, offset, Math.Min(length * 2, 4 * 1024 * 1024));
+                    // For initial ranges, use aggressive readahead for ultra-fast TTFB
+                    if (isInitialRange)
+                    {
+                        LinuxKernelHints.PrefetchFileRange(physicalPath, offset, Math.Min(contentLength, 8 * 1024 * 1024));
+                    }
+                    else
+                    {
+                        LinuxKernelHints.PrefetchFileRange(physicalPath, offset, Math.Min(length * 2, 4 * 1024 * 1024));
+                    }
                 }
 
                 Context.SetResult(DavStatusCode.PartialContent);
@@ -684,5 +707,32 @@ internal class GetHandler : RequestHandler
                contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
                contentType.Equals("application/x-nzb", StringComparison.OrdinalIgnoreCase) ||
                contentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Attempts to get the underlying socket from the HTTP context.
+    /// Used for applying low-level socket optimizations.
+    /// </summary>
+    private static System.Net.Sockets.Socket? GetSocketFromContext(HttpContext context)
+    {
+        try
+        {
+            var connectionInfo = context.Connection;
+            if (connectionInfo == null)
+                return null;
+
+            var connectionType = connectionInfo.GetType();
+            var socketProperty = connectionType.GetProperty("Socket");
+            if (socketProperty != null)
+            {
+                return socketProperty.GetValue(connectionInfo) as System.Net.Sockets.Socket;
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 }
