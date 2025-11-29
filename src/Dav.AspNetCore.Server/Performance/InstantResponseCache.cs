@@ -15,8 +15,9 @@ namespace Dav.AspNetCore.Server.Performance;
 /// - Validation tokens (ETag, Last-Modified) pre-formatted
 /// - Content-Range headers pre-computed for common seek positions
 /// </summary>
-internal sealed class InstantResponseCache
+internal sealed class InstantResponseCache : IDisposable
 {
+    private bool _disposed;
     private static readonly Lazy<InstantResponseCache> LazyInstance = new(() => new InstantResponseCache());
     public static InstantResponseCache Instance => LazyInstance.Value;
 
@@ -176,6 +177,9 @@ internal sealed class InstantResponseCache
 
     private void CleanupExpiredEntries(object? state)
     {
+        if (_disposed)
+            return;
+
         try
         {
             var cutoff = DateTime.UtcNow - CacheDuration * 2;
@@ -193,6 +197,18 @@ internal sealed class InstantResponseCache
         {
             // Non-critical cleanup
         }
+    }
+
+    /// <summary>
+    /// Disposes resources used by the cache.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _cleanupTimer.Dispose();
     }
 }
 

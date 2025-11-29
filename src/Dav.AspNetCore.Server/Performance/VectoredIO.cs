@@ -219,7 +219,14 @@ internal static class VectoredIO
             {
                 results[i] = new byte[chunks[i].Length];
                 stream.Seek(chunks[i].Offset, SeekOrigin.Begin);
-                stream.Read(results[i], 0, chunks[i].Length);
+                int totalRead = 0;
+                while (totalRead < chunks[i].Length)
+                {
+                    int bytesRead = stream.Read(results[i], totalRead, chunks[i].Length - totalRead);
+                    if (bytesRead == 0)
+                        break;
+                    totalRead += bytesRead;
+                }
             }
 
             return results;
@@ -242,7 +249,14 @@ internal static class VectoredIO
         {
             results[i] = new byte[chunks[i].Length];
             stream.Seek(chunks[i].Offset, SeekOrigin.Begin);
-            stream.Read(results[i], 0, chunks[i].Length);
+            int totalRead = 0;
+            while (totalRead < chunks[i].Length)
+            {
+                int bytesRead = stream.Read(results[i], totalRead, chunks[i].Length - totalRead);
+                if (bytesRead == 0)
+                    break;
+                totalRead += bytesRead;
+            }
         }
 
         return results;

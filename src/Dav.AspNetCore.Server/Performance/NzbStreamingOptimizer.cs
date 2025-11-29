@@ -17,8 +17,9 @@ namespace Dav.AspNetCore.Server.Performance;
 /// - Connection warmup coordination
 /// - Multi-layer caching orchestration
 /// </summary>
-internal sealed class NzbStreamingOptimizer
+internal sealed class NzbStreamingOptimizer : IDisposable
 {
+    private bool _disposed;
     private static readonly Lazy<NzbStreamingOptimizer> LazyInstance = new(() => new NzbStreamingOptimizer());
     public static NzbStreamingOptimizer Instance => LazyInstance.Value;
 
@@ -306,6 +307,9 @@ internal sealed class NzbStreamingOptimizer
 
     private void CleanupCallback(object? state)
     {
+        if (_disposed)
+            return;
+
         try
         {
             var now = DateTime.UtcNow;
@@ -325,6 +329,18 @@ internal sealed class NzbStreamingOptimizer
         {
             // Non-critical cleanup
         }
+    }
+
+    /// <summary>
+    /// Disposes resources used by the optimizer.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _cleanupTimer.Dispose();
     }
 
     /// <summary>

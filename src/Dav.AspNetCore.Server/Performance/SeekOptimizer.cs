@@ -12,8 +12,9 @@ namespace Dav.AspNetCore.Server.Performance;
 /// - Tracks common seek positions per file (e.g., chapter markers in video)
 /// - Coordinates with memory-mapped file pool for instant seeks
 /// </summary>
-internal sealed class SeekOptimizer
+internal sealed class SeekOptimizer : IDisposable
 {
+    private bool _disposed;
     private static readonly Lazy<SeekOptimizer> LazyInstance = new(() => new SeekOptimizer());
     public static SeekOptimizer Instance => LazyInstance.Value;
 
@@ -240,6 +241,9 @@ internal sealed class SeekOptimizer
 
     private void CleanupCallback(object? state)
     {
+        if (_disposed)
+            return;
+
         try
         {
             var cutoff = DateTime.UtcNow - TimeSpan.FromMinutes(10);
@@ -257,6 +261,18 @@ internal sealed class SeekOptimizer
         {
             // Non-critical cleanup
         }
+    }
+
+    /// <summary>
+    /// Disposes resources used by the optimizer.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _cleanupTimer.Dispose();
     }
 
     /// <summary>
@@ -387,9 +403,12 @@ internal sealed class SeekOptimizer
 
                 foreach (var pos in topPositions.Where(p => p != currentOffset && p < _fileSize))
                 {
-                    var accessCount = _positionCounts[(int)(pos / (1024 * 1024))];
-                    var confidence = Math.Min(95, 40 + accessCount * 10);
-                    predictions.Add(new SeekPredictionResult(pos, confidence));
+                    var bucket = pos / (1024 * 1024);
+                    if (_positionCounts.TryGetValue(bucket, out var accessCount))
+                    {
+                        var confidence = Math.Min(95, 40 + accessCount * 10);
+                        predictions.Add(new SeekPredictionResult(pos, confidence));
+                    }
                 }
 
                 // Add known seek points

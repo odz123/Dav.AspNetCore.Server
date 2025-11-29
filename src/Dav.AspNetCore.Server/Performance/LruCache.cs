@@ -8,12 +8,13 @@ namespace Dav.AspNetCore.Server.Performance;
 /// </summary>
 /// <typeparam name="TKey">The type of the cache key.</typeparam>
 /// <typeparam name="TValue">The type of the cached value.</typeparam>
-internal sealed class LruCache<TKey, TValue> where TKey : notnull
+internal sealed class LruCache<TKey, TValue> : IDisposable where TKey : notnull
 {
     private readonly int _capacity;
     private readonly ConcurrentDictionary<TKey, LinkedListNode<CacheEntry>> _cache;
     private readonly LinkedList<CacheEntry> _lruList;
     private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.NoRecursion);
+    private bool _disposed;
 
     private sealed class CacheEntry
     {
@@ -219,4 +220,16 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// Note: This is a snapshot and may not reflect concurrent modifications.
     /// </summary>
     public IEnumerable<TKey> Keys => _cache.Keys;
+
+    /// <summary>
+    /// Disposes resources used by the cache.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _rwLock.Dispose();
+    }
 }

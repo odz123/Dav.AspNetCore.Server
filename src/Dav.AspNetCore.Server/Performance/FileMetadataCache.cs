@@ -6,10 +6,11 @@ namespace Dav.AspNetCore.Server.Performance;
 /// Caches file metadata (size, last modified, content type) to reduce I/O before first byte.
 /// This significantly speeds up the initial response headers for streaming.
 /// </summary>
-internal sealed class FileMetadataCache
+internal sealed class FileMetadataCache : IDisposable
 {
     private static readonly Lazy<FileMetadataCache> LazyInstance = new(() => new FileMetadataCache());
     public static FileMetadataCache Instance => LazyInstance.Value;
+    private bool _disposed;
 
     /// <summary>
     /// Maximum cached entries.
@@ -120,10 +121,21 @@ internal sealed class FileMetadataCache
         {
             lockObj.Release();
 
-            // Clean up lock if no longer needed
-            if (lockObj.CurrentCount == 1)
+            // Clean up lock if no longer needed - but only if we can safely do so
+            // Note: We don't dispose here as another thread might reuse it;
+            // disposal happens in the class Dispose method
+            if (lockObj.CurrentCount == 1 && _locks.TryRemove(physicalPath, out var removed))
             {
-                _locks.TryRemove(physicalPath, out _);
+                // Only dispose if we successfully removed it and no one else grabbed it
+                if (removed == lockObj && removed.CurrentCount == 1)
+                {
+                    removed.Dispose();
+                }
+                else if (removed != null && removed != lockObj)
+                {
+                    // Put it back if it's a different instance (shouldn't happen)
+                    _locks.TryAdd(physicalPath, removed);
+                }
             }
         }
     }
@@ -196,6 +208,28 @@ internal sealed class FileMetadataCache
         {
             // Background refresh failures are non-critical
         }
+    }
+
+    /// <summary>
+    /// Disposes resources used by the cache.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+
+        // Dispose all semaphores
+        foreach (var kvp in _locks)
+        {
+            if (_locks.TryRemove(kvp.Key, out var semaphore))
+            {
+                semaphore.Dispose();
+            }
+        }
+
+        _cache.Dispose();
     }
 }
 
