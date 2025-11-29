@@ -78,9 +78,9 @@ internal sealed class NzbStreamingOptimizer
         ApplySocketOptimizations(context, contentLength, prep.Strategy);
 
         // Pre-warm next predicted seeks
-        if (prep.ClientState != null && prep.Strategy == StreamingStrategy.AggressiveStream)
+        if (prep.ClientState is ClientStreamState clientState && prep.Strategy == StreamingStrategy.AggressiveStream)
         {
-            PreWarmPredictedSeeks(physicalPath, prep.ClientState, contentLength);
+            PreWarmPredictedSeeks(physicalPath, clientState, contentLength);
         }
 
         return prep;
@@ -355,7 +355,6 @@ internal sealed class NzbStreamingOptimizer
         private DateTime _lastAccess;
         private long _totalBytesTransferred;
         private int _seekCount;
-        private long _avgSeekDistance;
         private readonly object _lock = new();
 
         public bool IsHot
@@ -538,7 +537,7 @@ internal sealed class NzbStreamingOptimizer
 /// <summary>
 /// Preparation data for streaming a file.
 /// </summary>
-public struct StreamingPreparation
+internal struct StreamingPreparation
 {
     /// <summary>Whether this is a frequently accessed hot file.</summary>
     public bool IsHotFile { get; set; }
