@@ -71,7 +71,9 @@ public class IfHeaderValue
 
                 var resourceTag = inputSpan.Slice(i + 1, closingIndex - i - 1).ToString();
 
-                if (!string.IsNullOrWhiteSpace(currentResourceTag))
+                // Save any pending conditions for the previous resource tag
+                // This handles both tagged and untagged (empty) resource tags
+                if (conditions.Count > 0)
                 {
                     resources.Add(new ResourceTag(currentResourceTag, conditions.ToArray()));
                     conditions.Clear();

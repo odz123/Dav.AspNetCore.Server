@@ -221,7 +221,8 @@ internal class GetHandler : RequestHandler
                         }
                     }
 
-                    var stream = handle.CreatePositionedStream(offset);
+                    // CreatePositionedStream returns an independent stream that must be disposed
+                    await using var stream = handle.CreatePositionedStream(offset);
                     var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(physicalPath);
                     await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken)
                         .ConfigureAwait(false);

@@ -363,6 +363,8 @@ internal sealed class FileHandleCache : IDisposable
 
 /// <summary>
 /// A wrapper for a cached file handle that manages ownership.
+/// WARNING: When using cached (non-owned) handles, callers must synchronize access
+/// or use CreateIndependentStream() for concurrent access scenarios.
 /// </summary>
 internal sealed class CachedFileHandle : IDisposable
 {
@@ -378,6 +380,8 @@ internal sealed class CachedFileHandle : IDisposable
 
     /// <summary>
     /// Gets the underlying file stream.
+    /// WARNING: This stream is shared when using cached handles.
+    /// Do not modify the position without synchronization.
     /// </summary>
     public FileStream Stream => _handle.Stream;
 
@@ -387,11 +391,26 @@ internal sealed class CachedFileHandle : IDisposable
     public int FileDescriptor => LinuxKernelHints.GetFileDescriptor(_handle.Stream);
 
     /// <summary>
-    /// Creates a new stream positioned at the specified offset.
+    /// Gets the file path for this handle.
+    /// </summary>
+    public string FilePath => _handle.FilePath;
+
+    /// <summary>
+    /// Creates a new independent stream positioned at the specified offset.
+    /// This creates a NEW FileStream to avoid race conditions with the cached stream.
+    /// The caller is responsible for disposing the returned stream.
     /// </summary>
     public FileStream CreatePositionedStream(long offset)
     {
-        var stream = _handle.Stream;
+        // Create a new independent stream to avoid race conditions
+        // The cached stream cannot be safely shared for positioned reads
+        var stream = new FileStream(
+            _handle.FilePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.Asynchronous | FileOptions.RandomAccess);
         stream.Seek(offset, SeekOrigin.Begin);
         return stream;
     }

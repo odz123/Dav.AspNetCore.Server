@@ -204,13 +204,16 @@ internal sealed class MemoryMappedFilePool : IDisposable
         _disposed = true;
         _cleanupTimer.Dispose();
 
-        foreach (var key in _pool.Keys)
+        foreach (var key in _pool.Keys.ToList())
         {
             if (_pool.TryRemove(key, out var entry) && entry != null)
             {
                 entry.Dispose();
             }
         }
+
+        // Dispose the LRU cache to release the ReaderWriterLockSlim
+        _pool.Dispose();
     }
 
     /// <summary>
