@@ -219,6 +219,7 @@ internal sealed class MemoryMappedFilePool : IDisposable
     private sealed class PooledMappedFile : IDisposable
     {
         private readonly MemoryMappedFile _mappedFile;
+        private readonly object _lock = new();
         public long FileSize { get; }
         public DateTime LastModified { get; }
         public DateTime LastAccess { get; set; }
@@ -232,34 +233,66 @@ internal sealed class MemoryMappedFilePool : IDisposable
             LastAccess = DateTime.UtcNow;
         }
 
-        public Stream CreateViewStream()
+        public Stream? CreateViewStream()
         {
-            if (_disposed)
-                throw new ObjectDisposedException(nameof(PooledMappedFile));
+            lock (_lock)
+            {
+                if (_disposed)
+                    return null;
 
-            return _mappedFile.CreateViewStream(0, FileSize, MemoryMappedFileAccess.Read);
+                try
+                {
+                    return _mappedFile.CreateViewStream(0, FileSize, MemoryMappedFileAccess.Read);
+                }
+                catch (ObjectDisposedException)
+                {
+                    return null;
+                }
+            }
         }
 
-        public Stream CreateViewStream(long offset, long length)
+        public Stream? CreateViewStream(long offset, long length)
         {
-            if (_disposed)
-                throw new ObjectDisposedException(nameof(PooledMappedFile));
+            lock (_lock)
+            {
+                if (_disposed)
+                    return null;
 
-            // Ensure we don't exceed file bounds
-            var safeLength = Math.Min(length, FileSize - offset);
-            if (safeLength <= 0)
-                return Stream.Null;
+                // Ensure we don't exceed file bounds
+                var safeLength = Math.Min(length, FileSize - offset);
+                if (safeLength <= 0)
+                    return Stream.Null;
 
-            return _mappedFile.CreateViewStream(offset, safeLength, MemoryMappedFileAccess.Read);
+                try
+                {
+                    return _mappedFile.CreateViewStream(offset, safeLength, MemoryMappedFileAccess.Read);
+                }
+                catch (ObjectDisposedException)
+                {
+                    return null;
+                }
+            }
         }
 
         public void Dispose()
         {
-            if (_disposed)
-                return;
+            lock (_lock)
+            {
+                if (_disposed)
+                    return;
 
-            _disposed = true;
-            _mappedFile.Dispose();
+                _disposed = true;
+            }
+
+            // Dispose outside the lock to avoid potential deadlocks
+            try
+            {
+                _mappedFile.Dispose();
+            }
+            catch
+            {
+                // Ignore disposal errors
+            }
         }
     }
 }

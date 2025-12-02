@@ -4,10 +4,11 @@ namespace Dav.AspNetCore.Server.Performance;
 /// Prioritizes initial range requests (first bytes of files) for fast stream starts.
 /// NZB and video clients need the file header quickly to begin playback/parsing.
 /// </summary>
-internal sealed class InitialRangePrioritizer
+internal sealed class InitialRangePrioritizer : IDisposable
 {
     private static readonly Lazy<InitialRangePrioritizer> LazyInstance = new(() => new InitialRangePrioritizer());
     public static InitialRangePrioritizer Instance => LazyInstance.Value;
+    private volatile bool _disposed;
 
     /// <summary>
     /// Ranges starting within this offset are considered "initial" and get priority.
@@ -87,7 +88,7 @@ internal sealed class InitialRangePrioritizer
     /// <returns>A disposable that releases the slot when done.</returns>
     public async Task<IDisposable?> AcquirePrioritySlotAsync(long offset, CancellationToken cancellationToken)
     {
-        if (!IsInitialRange(offset))
+        if (_disposed || !IsInitialRange(offset))
             return null;
 
         // Try to acquire without waiting - initial ranges shouldn't block
@@ -229,6 +230,19 @@ internal sealed class InitialRangePrioritizer
             _disposed = true;
             _semaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Disposes the prioritizer and releases associated resources.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _prioritySemaphore.Dispose();
+        _fileStarts.Dispose();
     }
 }
 

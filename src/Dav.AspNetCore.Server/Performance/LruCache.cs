@@ -8,12 +8,13 @@ namespace Dav.AspNetCore.Server.Performance;
 /// </summary>
 /// <typeparam name="TKey">The type of the cache key.</typeparam>
 /// <typeparam name="TValue">The type of the cached value.</typeparam>
-internal sealed class LruCache<TKey, TValue> where TKey : notnull
+internal sealed class LruCache<TKey, TValue> : IDisposable where TKey : notnull
 {
     private readonly int _capacity;
     private readonly ConcurrentDictionary<TKey, LinkedListNode<CacheEntry>> _cache;
     private readonly LinkedList<CacheEntry> _lruList;
     private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.NoRecursion);
+    private volatile bool _disposed;
 
     private sealed class CacheEntry
     {
@@ -54,17 +55,31 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// <returns>True if the key was found, false otherwise.</returns>
     public bool TryGetValue(TKey key, out TValue? value)
     {
+        if (_disposed)
+        {
+            value = default;
+            return false;
+        }
+
         if (_cache.TryGetValue(key, out var node))
         {
-            // Use write lock only for LRU list reordering
+            // Use write lock for LRU list reordering
             _rwLock.EnterWriteLock();
             try
             {
-                // Move to front (most recently used)
-                if (node.List != null)
+                // Re-validate node is still in the list (TOCTOU protection)
+                // Another thread could have removed it between the TryGetValue and acquiring the lock
+                if (node.List == _lruList)
                 {
                     _lruList.Remove(node);
                     _lruList.AddFirst(node);
+                }
+                else if (node.List == null)
+                {
+                    // Node was removed from list, but we still have the value
+                    // This is a race condition - return the value but don't update LRU
+                    value = node.Value.Value;
+                    return true;
                 }
             }
             finally
@@ -219,4 +234,16 @@ internal sealed class LruCache<TKey, TValue> where TKey : notnull
     /// Note: This is a snapshot and may not reflect concurrent modifications.
     /// </summary>
     public IEnumerable<TKey> Keys => _cache.Keys;
+
+    /// <summary>
+    /// Disposes the cache and releases the ReaderWriterLockSlim.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _rwLock.Dispose();
+    }
 }

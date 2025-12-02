@@ -9,14 +9,14 @@ namespace Dav.AspNetCore.Server.Extensions;
 public abstract class SqlLockManager : ILockManager, IDisposable
 {
     private readonly SqlLockOptions options;
-    private readonly Lazy<DbConnection> connection;
+    private volatile bool _disposed;
 
     private static readonly ValueTask<IReadOnlyCollection<LockType>> SupportedLocks = new(new List<LockType>
     {
         LockType.Exclusive,
         LockType.Shared
     });
-    
+
     /// <summary>
     /// Initializes a new <see cref="SqlLockManager"/> class.
     /// </summary>
@@ -24,12 +24,32 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     protected SqlLockManager(SqlLockOptions options)
     {
         ArgumentNullException.ThrowIfNull(options, nameof(options));
-        
+
         this.options = options;
-        connection = new Lazy<DbConnection>(() => CreateConnection(options.ConnectionString));
+    }
+
+    /// <summary>
+    /// Gets an open connection for database operations.
+    /// Creates a new connection each time to leverage connection pooling properly.
+    /// </summary>
+    private async Task<DbConnection> GetOpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var connection = CreateConnection(options.ConnectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
     
-        /// <summary>
+    /// <summary>
     /// Locks the resource async.
     /// </summary>
     /// <param name="uri">The uri.</param>
@@ -40,20 +60,17 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The lock result.</returns>
     public async ValueTask<LockResult> LockAsync(
-        Uri uri, 
-        LockType lockType, 
-        XElement owner, 
-        bool recursive, 
+        Uri uri,
+        LockType lockType,
+        XElement owner,
+        bool recursive,
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(uri, nameof(uri));
         ArgumentNullException.ThrowIfNull(owner, nameof(owner));
-        
-        if (connection.Value.State != ConnectionState.Open)
-            await connection.Value.OpenAsync(cancellationToken);
-        
-        var activeLocks = await GetLocksAsync(uri, cancellationToken);
+
+        var activeLocks = await GetLocksAsync(uri, cancellationToken).ConfigureAwait(false);
         if ((activeLocks.All(x => x.LockType == LockType.Shared) &&
              lockType == LockType.Shared) ||
             activeLocks.Count == 0)
@@ -66,11 +83,12 @@ public abstract class SqlLockManager : ILockManager, IDisposable
                 recursive,
                 timeout,
                 DateTime.UtcNow);
-            
+
             var depth = uri.LocalPath.Count(x => x == '/') - 1;
 
+            await using var connection = await GetOpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await using var command = GetInsertCommand(
-                connection.Value,
+                connection,
                 newLock.Id.AbsoluteUri,
                 newLock.Uri.LocalPath,
                 newLock.LockType,
@@ -79,12 +97,12 @@ public abstract class SqlLockManager : ILockManager, IDisposable
                 (long)newLock.Timeout.TotalSeconds,
                 (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds,
                 depth);
-            
-            var affectedRows = await command.ExecuteNonQueryAsync(cancellationToken);
+
+            var affectedRows = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             if (affectedRows > 0)
                 return new LockResult(DavStatusCode.Ok, newLock);
         }
-        
+
         return new LockResult(DavStatusCode.Locked);
     }
         
@@ -98,26 +116,25 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// <returns>The lock result.</returns>
     public async ValueTask<LockResult> RefreshLockAsync(
         Uri uri,
-        Uri token, 
-        TimeSpan timeout, 
+        Uri token,
+        TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(uri, nameof(uri));
         ArgumentNullException.ThrowIfNull(token, nameof(token));
-        
-        if (connection.Value.State != ConnectionState.Open)
-            await connection.Value.OpenAsync(cancellationToken);
+
+        await using var connection = await GetOpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         string? id = null;
 
         await using (var command = GetActiveLockByIdCommand(
-            connection.Value,
+            connection,
             token.AbsoluteUri,
             uri.LocalPath,
             (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds))
         {
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (await reader.ReadAsync(cancellationToken))
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 id = reader.GetString("Id");
             }
@@ -126,12 +143,12 @@ public abstract class SqlLockManager : ILockManager, IDisposable
         if (id != null)
         {
             await using var updateCommand = GetRefreshCommand(
-                connection.Value,
+                connection,
                 id,
                 (long)timeout.TotalSeconds,
                 (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds);
 
-            var affectedRows = await updateCommand.ExecuteNonQueryAsync(cancellationToken);
+            var affectedRows = await updateCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             if (affectedRows > 0)
                 return new LockResult(DavStatusCode.Ok);
         }
@@ -147,26 +164,25 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The status code.</returns>
     public async ValueTask<DavStatusCode> UnlockAsync(
-        Uri uri, 
-        Uri token, 
+        Uri uri,
+        Uri token,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(uri, nameof(uri));
         ArgumentNullException.ThrowIfNull(token, nameof(token));
-        
-        if (connection.Value.State != ConnectionState.Open)
-            await connection.Value.OpenAsync(cancellationToken);
+
+        await using var connection = await GetOpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         string? id = null;
 
         await using (var command = GetActiveLockByIdCommand(
-            connection.Value,
+            connection,
             token.AbsoluteUri,
             uri.LocalPath,
             (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds))
         {
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (await reader.ReadAsync(cancellationToken))
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 id = reader.GetString("Id");
             }
@@ -174,9 +190,9 @@ public abstract class SqlLockManager : ILockManager, IDisposable
 
         if (id != null)
         {
-            await using var deleteCommand = GetDeleteCommand(connection.Value, id);
+            await using var deleteCommand = GetDeleteCommand(connection, id);
 
-            var affectedRows = await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+            var affectedRows = await deleteCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             if (affectedRows > 0)
                 return DavStatusCode.NoContent;
         }
@@ -191,25 +207,24 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A list of all active resource locks for the given resource.</returns>
     public async ValueTask<IReadOnlyCollection<ResourceLock>> GetLocksAsync(
-        Uri uri, 
+        Uri uri,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(uri, nameof(uri));
-        
-        if (connection.Value.State != ConnectionState.Open)
-            await connection.Value.OpenAsync(cancellationToken);
+
+        await using var connection = await GetOpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         var allActiveLocks = new List<ResourceLock>();
         var depth = uri.LocalPath.Count(x => x == '/') - 1;
 
         await using var command = GetActiveLocksCommand(
-            connection.Value,
+            connection,
             uri.LocalPath,
             depth,
             (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var resourceLock = new ResourceLock(
                 new Uri(reader.GetString("Id")),
@@ -219,7 +234,7 @@ public abstract class SqlLockManager : ILockManager, IDisposable
                 reader.GetBoolean("Recursive"),
                 TimeSpan.FromSeconds(reader.GetInt64("Timeout")),
                 DateTime.UnixEpoch + TimeSpan.FromSeconds(reader.GetInt64("Issued")));
-            
+
             allActiveLocks.Add(resourceLock);
         }
 
@@ -244,8 +259,7 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// </summary>
     public void Dispose()
     {
-        if (connection.IsValueCreated)
-            connection.Value.Dispose();
+        _disposed = true;
     }
 
     /// <summary>
@@ -253,14 +267,13 @@ public abstract class SqlLockManager : ILockManager, IDisposable
     /// </summary>
     public async Task RemoveStaleLocksAsync(CancellationToken cancellationToken = default)
     {
-        if (connection.Value.State != ConnectionState.Open)
-            await connection.Value.OpenAsync(cancellationToken);
-        
+        await using var connection = await GetOpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
         await using var command = GetDeleteStaleCommand(
-            connection.Value,
+            connection,
             (long)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds);
-        
-        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
