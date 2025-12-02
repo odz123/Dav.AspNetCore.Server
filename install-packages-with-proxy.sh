@@ -79,27 +79,27 @@ echo ""
 download_package "Microsoft.IO.RecyclableMemoryStream" "3.0.1"
 
 # Test project direct dependencies
-download_package "Microsoft.NET.Test.Sdk" "17.12.0"
+download_package "Microsoft.NET.Test.Sdk" "18.0.1"
 download_package "Moq" "4.20.72"
-download_package "xunit" "2.9.2"
-download_package "xunit.runner.visualstudio" "2.8.2"
-download_package "coverlet.collector" "6.0.2"
+download_package "xunit" "2.9.3"
+download_package "xunit.runner.visualstudio" "3.1.5"
+download_package "coverlet.collector" "6.0.4"
 
 # xunit dependencies
-download_package "xunit.core" "2.9.2"
-download_package "xunit.extensibility.core" "2.9.2"
-download_package "xunit.extensibility.execution" "2.9.2"
-download_package "xunit.assert" "2.9.2"
+download_package "xunit.core" "2.9.3"
+download_package "xunit.extensibility.core" "2.9.3"
+download_package "xunit.extensibility.execution" "2.9.3"
+download_package "xunit.assert" "2.9.3"
 download_package "xunit.abstractions" "2.0.3"
-download_package "xunit.analyzers" "1.16.0"
+download_package "xunit.analyzers" "1.18.0"
 
 # Moq dependencies
 download_package "Castle.Core" "5.1.1"
 
 # Test SDK dependencies
-download_package "Microsoft.TestPlatform.TestHost" "17.12.0"
-download_package "Microsoft.TestPlatform.ObjectModel" "17.12.0"
-download_package "Microsoft.CodeCoverage" "17.12.0"
+download_package "Microsoft.TestPlatform.TestHost" "18.0.1"
+download_package "Microsoft.TestPlatform.ObjectModel" "18.0.1"
+download_package "Microsoft.CodeCoverage" "18.0.1"
 download_package "NuGet.Frameworks" "6.12.1"
 
 # Additional transitive dependencies
@@ -108,10 +108,35 @@ download_package "System.Reflection.Metadata" "9.0.0"
 download_package "System.Collections.Immutable" "9.0.0"
 
 # coverlet dependencies
-download_package "coverlet.msbuild" "6.0.2"
+download_package "coverlet.msbuild" "6.0.4"
 
 # System.Diagnostics.EventLog for Castle.Core
 download_package "System.Diagnostics.EventLog" "8.0.0"
+
+# Extension project dependencies
+download_package "Microsoft.Extensions.DependencyInjection.Abstractions" "10.0.0"
+download_package "Npgsql" "10.0.0"
+download_package "Microsoft.Data.Sqlite" "10.0.0"
+download_package "Microsoft.Data.Sqlite.Core" "10.0.0"
+download_package "Microsoft.Data.SqlClient" "6.1.3"
+download_package "SQLitePCLRaw.bundle_e_sqlite3" "2.1.11"
+download_package "SQLitePCLRaw.core" "2.1.11"
+download_package "SQLitePCLRaw.lib.e_sqlite3" "2.1.11"
+download_package "SQLitePCLRaw.provider.e_sqlite3" "2.1.11"
+
+# Additional transitive dependencies for SqlClient
+download_package "Azure.Core" "1.44.1"
+download_package "Azure.Identity" "1.13.2"
+download_package "Microsoft.Bcl.Cryptography" "9.0.3"
+download_package "Microsoft.Data.SqlClient.SNI.runtime" "6.0.1"
+download_package "Microsoft.Extensions.Caching.Memory" "9.0.3"
+download_package "Microsoft.Extensions.Logging.Abstractions" "10.0.0"
+download_package "Microsoft.IdentityModel.JsonWebTokens" "8.7.0"
+download_package "Microsoft.IdentityModel.Protocols.OpenIdConnect" "8.7.0"
+download_package "Microsoft.SqlServer.Server" "1.0.0"
+download_package "System.Configuration.ConfigurationManager" "9.0.3"
+download_package "System.Security.Cryptography.Pkcs" "9.0.3"
+download_package "System.Text.Json" "9.0.3"
 
 echo ""
 echo "=== Download complete ==="
