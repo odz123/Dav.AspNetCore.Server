@@ -42,8 +42,10 @@ internal sealed class ParallelChunkPrefetcher : IDisposable
     private readonly LruCache<string, PrefetchedFile> _prefetchedFiles;
     private readonly SemaphoreSlim _concurrencySemaphore;
     private readonly Task[] _workerTasks;
+    private readonly Timer _cleanupTimer;
     private readonly CancellationTokenSource _cts;
-    private bool _disposed;
+    private volatile bool _disposed;
+    private int _cleanupRunning;
 
     private ParallelChunkPrefetcher()
     {
@@ -63,6 +65,53 @@ internal sealed class ParallelChunkPrefetcher : IDisposable
         for (int i = 0; i < _workerTasks.Length; i++)
         {
             _workerTasks[i] = Task.Run(() => ProcessRequestsAsync(_cts.Token));
+        }
+
+        // Cleanup expired entries every 15 seconds
+        _cleanupTimer = new Timer(CleanupExpiredEntries, null,
+            TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
+    }
+
+    private void CleanupExpiredEntries(object? state)
+    {
+        if (_disposed)
+            return;
+
+        // Prevent concurrent cleanup runs
+        if (Interlocked.CompareExchange(ref _cleanupRunning, 1, 0) != 0)
+            return;
+
+        try
+        {
+            var keysToRemove = new List<string>();
+
+            foreach (var key in _prefetchedFiles.Keys)
+            {
+                if (_disposed) break;
+
+                if (_prefetchedFiles.TryGetValue(key, out var file) && file != null && file.IsExpired)
+                {
+                    keysToRemove.Add(key);
+                }
+            }
+
+            foreach (var key in keysToRemove)
+            {
+                if (_disposed) break;
+
+                if (_prefetchedFiles.TryRemove(key, out var file) && file != null)
+                {
+                    file.Clear();
+                }
+            }
+        }
+        catch
+        {
+            // Cleanup errors are non-critical
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _cleanupRunning, 0);
         }
     }
 
@@ -305,6 +354,7 @@ internal sealed class ParallelChunkPrefetcher : IDisposable
             return;
 
         _disposed = true;
+        _cleanupTimer.Dispose();
         _cts.Cancel();
         _requestChannel.Writer.Complete();
 
@@ -317,6 +367,9 @@ internal sealed class ParallelChunkPrefetcher : IDisposable
             // Ignore shutdown errors
         }
 
+        // Wait for any running cleanup to finish
+        SpinWait.SpinUntil(() => Interlocked.CompareExchange(ref _cleanupRunning, 0, 0) == 0, TimeSpan.FromSeconds(2));
+
         _cts.Dispose();
         _concurrencySemaphore.Dispose();
 
@@ -328,6 +381,8 @@ internal sealed class ParallelChunkPrefetcher : IDisposable
                 file.Clear();
             }
         }
+
+        _prefetchedFiles.Dispose();
     }
 
     private readonly struct PrefetchRequest

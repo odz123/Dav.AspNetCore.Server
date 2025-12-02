@@ -32,7 +32,8 @@ internal sealed class FileHandleCache : IDisposable
     private readonly LruCache<string, CachedHandle> _handleCache;
     private readonly ConcurrentDictionary<string, FileAccessStats> _accessStats;
     private readonly Timer _cleanupTimer;
-    private bool _disposed;
+    private volatile bool _disposed;
+    private int _cleanupRunning;
 
     private FileHandleCache()
     {
@@ -180,6 +181,10 @@ internal sealed class FileHandleCache : IDisposable
         if (_disposed)
             return;
 
+        // Prevent concurrent cleanup runs
+        if (Interlocked.CompareExchange(ref _cleanupRunning, 1, 0) != 0)
+            return;
+
         try
         {
             var now = DateTime.UtcNow;
@@ -188,6 +193,8 @@ internal sealed class FileHandleCache : IDisposable
             // Find expired handles
             foreach (var key in _handleCache.Keys)
             {
+                if (_disposed) break; // Check for disposal during iteration
+
                 if (_handleCache.TryGetValue(key, out var handle) && handle != null)
                 {
                     if (!handle.IsValid || (now - handle.LastUsed) > HandleExpiration)
@@ -200,6 +207,8 @@ internal sealed class FileHandleCache : IDisposable
             // Remove expired handles
             foreach (var key in keysToRemove)
             {
+                if (_disposed) break; // Check for disposal during iteration
+
                 if (_handleCache.TryRemove(key, out var handle) && handle != null)
                 {
                     handle.Dispose();
@@ -224,6 +233,10 @@ internal sealed class FileHandleCache : IDisposable
         {
             // Cleanup errors are non-critical
         }
+        finally
+        {
+            Interlocked.Exchange(ref _cleanupRunning, 0);
+        }
     }
 
     public void Dispose()
@@ -234,6 +247,9 @@ internal sealed class FileHandleCache : IDisposable
         _disposed = true;
         _cleanupTimer.Dispose();
 
+        // Wait for any running cleanup to finish
+        SpinWait.SpinUntil(() => Interlocked.CompareExchange(ref _cleanupRunning, 0, 0) == 0, TimeSpan.FromSeconds(5));
+
         foreach (var key in _handleCache.Keys.ToList())
         {
             if (_handleCache.TryRemove(key, out var handle) && handle != null)
@@ -241,6 +257,8 @@ internal sealed class FileHandleCache : IDisposable
                 handle.Dispose();
             }
         }
+
+        _handleCache.Dispose();
     }
 
     /// <summary>

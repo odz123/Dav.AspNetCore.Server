@@ -6,7 +6,7 @@ namespace Dav.AspNetCore.Server.Performance;
 /// Caches file metadata (size, last modified, content type) to reduce I/O before first byte.
 /// This significantly speeds up the initial response headers for streaming.
 /// </summary>
-internal sealed class FileMetadataCache
+internal sealed class FileMetadataCache : IDisposable
 {
     private static readonly Lazy<FileMetadataCache> LazyInstance = new(() => new FileMetadataCache());
     public static FileMetadataCache Instance => LazyInstance.Value;
@@ -28,12 +28,53 @@ internal sealed class FileMetadataCache
     private static readonly TimeSpan MaxAge = TimeSpan.FromMinutes(5);
 
     private readonly LruCache<string, CachedMetadata?> _cache;
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks;
+    private readonly ConcurrentDictionary<string, RefCountedSemaphore> _locks;
+    private volatile bool _disposed;
 
     private FileMetadataCache()
     {
         _cache = new LruCache<string, CachedMetadata?>(MaxCacheSize);
-        _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
+        _locks = new ConcurrentDictionary<string, RefCountedSemaphore>();
+    }
+
+    /// <summary>
+    /// A reference-counted semaphore wrapper that tracks active waiters.
+    /// </summary>
+    private sealed class RefCountedSemaphore : IDisposable
+    {
+        private readonly SemaphoreSlim _semaphore = new(1, 1);
+        private int _refCount;
+        private bool _disposed;
+
+        public int RefCount => Volatile.Read(ref _refCount);
+
+        public void IncrementRef()
+        {
+            Interlocked.Increment(ref _refCount);
+        }
+
+        public int DecrementRef()
+        {
+            return Interlocked.Decrement(ref _refCount);
+        }
+
+        public async Task WaitAsync(CancellationToken cancellationToken)
+        {
+            await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        public void Release()
+        {
+            _semaphore.Release();
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            _semaphore.Dispose();
+        }
     }
 
     /// <summary>
@@ -76,7 +117,7 @@ internal sealed class FileMetadataCache
     /// </summary>
     public async ValueTask<CachedMetadata?> GetMetadataAsync(string physicalPath, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(physicalPath))
+        if (string.IsNullOrEmpty(physicalPath) || _disposed)
             return null;
 
         var now = DateTime.UtcNow;
@@ -97,8 +138,9 @@ internal sealed class FileMetadataCache
             }
         }
 
-        // Need fresh data - use semaphore to prevent thundering herd
-        var lockObj = _locks.GetOrAdd(physicalPath, _ => new SemaphoreSlim(1, 1));
+        // Need fresh data - use ref-counted semaphore to prevent thundering herd
+        var lockObj = _locks.GetOrAdd(physicalPath, _ => new RefCountedSemaphore());
+        lockObj.IncrementRef();
 
         try
         {
@@ -107,7 +149,7 @@ internal sealed class FileMetadataCache
             // Double-check after acquiring lock
             if (_cache.TryGetValue(physicalPath, out cached) && cached.HasValue)
             {
-                if (now - cached.Value.CachedAt < CacheTtl)
+                if (DateTime.UtcNow - cached.Value.CachedAt < CacheTtl)
                 {
                     return cached;
                 }
@@ -120,10 +162,18 @@ internal sealed class FileMetadataCache
         {
             lockObj.Release();
 
-            // Clean up lock if no longer needed
-            if (lockObj.CurrentCount == 1)
+            // Clean up lock if no longer used (thread-safe with ref counting)
+            if (lockObj.DecrementRef() == 0)
             {
-                _locks.TryRemove(physicalPath, out _);
+                if (_locks.TryRemove(physicalPath, out var removed))
+                {
+                    // Only dispose if it's the same instance we removed
+                    // (another thread might have added a new one)
+                    if (ReferenceEquals(removed, lockObj))
+                    {
+                        removed.Dispose();
+                    }
+                }
             }
         }
     }
@@ -161,6 +211,25 @@ internal sealed class FileMetadataCache
     public void Clear()
     {
         _cache.Clear();
+    }
+
+    /// <summary>
+    /// Disposes the cache and all semaphores.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _cache.Dispose();
+
+        // Dispose all semaphores
+        foreach (var kvp in _locks)
+        {
+            kvp.Value.Dispose();
+        }
+        _locks.Clear();
     }
 
     private CachedMetadata? FetchAndCacheMetadata(string physicalPath)
