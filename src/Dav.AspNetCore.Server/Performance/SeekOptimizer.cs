@@ -387,7 +387,7 @@ internal sealed class SeekOptimizer
 
                 foreach (var pos in topPositions.Where(p => p != currentOffset && p < _fileSize))
                 {
-                    var accessCount = _positionCounts[(int)(pos / (1024 * 1024))];
+                    var accessCount = _positionCounts[pos / (1024 * 1024)];
                     var confidence = Math.Min(95, 40 + accessCount * 10);
                     predictions.Add(new SeekPredictionResult(pos, confidence));
                 }
