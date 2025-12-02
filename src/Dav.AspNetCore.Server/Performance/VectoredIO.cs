@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Buffers;
 
 namespace Dav.AspNetCore.Server.Performance;
 
@@ -77,9 +78,13 @@ internal static class VectoredIO
             for (int i = 0; i < iovCount; i++)
             {
                 var buffer = buffers[i];
-                handles[i] = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                iov[i].Base = handles[i].AddrOfPinnedObject();
-                iov[i].Length = (nuint)buffer.Length;
+                // Memory<byte> cannot be pinned directly - must get underlying array
+                if (!MemoryMarshal.TryGetArray<byte>(buffer, out var segment) || segment.Array == null)
+                    return -1; // Cannot pin non-array-backed memory
+
+                handles[i] = GCHandle.Alloc(segment.Array, GCHandleType.Pinned);
+                iov[i].Base = handles[i].AddrOfPinnedObject() + segment.Offset;
+                iov[i].Length = (nuint)segment.Count;
             }
 
             return readv(fd, iov, iovCount);
@@ -116,9 +121,13 @@ internal static class VectoredIO
             for (int i = 0; i < iovCount; i++)
             {
                 var buffer = buffers[i];
-                handles[i] = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                iov[i].Base = handles[i].AddrOfPinnedObject();
-                iov[i].Length = (nuint)buffer.Length;
+                // Memory<byte> cannot be pinned directly - must get underlying array
+                if (!MemoryMarshal.TryGetArray<byte>(buffer, out var segment) || segment.Array == null)
+                    return -1; // Cannot pin non-array-backed memory
+
+                handles[i] = GCHandle.Alloc(segment.Array, GCHandleType.Pinned);
+                iov[i].Base = handles[i].AddrOfPinnedObject() + segment.Offset;
+                iov[i].Length = (nuint)segment.Count;
             }
 
             return preadv(fd, iov, iovCount, offset);
@@ -153,9 +162,13 @@ internal static class VectoredIO
             for (int i = 0; i < iovCount; i++)
             {
                 var buffer = buffers[i];
-                handles[i] = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                iov[i].Base = handles[i].AddrOfPinnedObject();
-                iov[i].Length = (nuint)buffer.Length;
+                // ReadOnlyMemory<byte> cannot be pinned directly - must get underlying array
+                if (!MemoryMarshal.TryGetArray(buffer, out var segment) || segment.Array == null)
+                    return -1; // Cannot pin non-array-backed memory
+
+                handles[i] = GCHandle.Alloc(segment.Array, GCHandleType.Pinned);
+                iov[i].Base = handles[i].AddrOfPinnedObject() + segment.Offset;
+                iov[i].Length = (nuint)segment.Count;
             }
 
             return writev(fd, iov, iovCount);
@@ -277,9 +290,14 @@ internal static class VectoredIO
         {
             for (int i = 0; i < iovCount; i++)
             {
-                handles[i] = GCHandle.Alloc(buffers[i], GCHandleType.Pinned);
-                iov[i].Base = handles[i].AddrOfPinnedObject();
-                iov[i].Length = (nuint)buffers[i].Length;
+                var buffer = buffers[i];
+                // Memory<byte> cannot be pinned directly - must get underlying array
+                if (!MemoryMarshal.TryGetArray<byte>(buffer, out var segment) || segment.Array == null)
+                    return FallbackReadContiguous(stream, offset, buffers); // Fallback for non-array-backed memory
+
+                handles[i] = GCHandle.Alloc(segment.Array, GCHandleType.Pinned);
+                iov[i].Base = handles[i].AddrOfPinnedObject() + segment.Offset;
+                iov[i].Length = (nuint)segment.Count;
             }
 
             return preadv(fd, iov, iovCount, offset);
