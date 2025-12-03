@@ -1,6 +1,26 @@
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Text;
 
 namespace Dav.AspNetCore.Server.Performance;
+
+/// <summary>
+/// Specifies the expected file access pattern for stream optimization.
+/// </summary>
+public enum FileAccessPattern
+{
+    /// <summary>
+    /// Sequential access - reading the file from start to end.
+    /// Enables OS read-ahead optimization (FileOptions.SequentialScan).
+    /// </summary>
+    Sequential,
+
+    /// <summary>
+    /// Random access - seeking to various positions in the file.
+    /// Disables read-ahead for better seek performance (FileOptions.RandomAccess).
+    /// </summary>
+    RandomAccess
+}
 
 /// <summary>
 /// Provides pooled buffer operations for high-performance I/O.
@@ -216,6 +236,40 @@ internal static class BufferPool
         {
             Return(buffer1);
             Return(buffer2);
+        }
+    }
+}
+
+/// <summary>
+/// Provides pooled StringBuilder instances to reduce allocations.
+/// </summary>
+internal static class StringBuilderPool
+{
+    private static readonly ConcurrentBag<StringBuilder> Pool = new();
+    private const int MaxPoolSize = 32;
+    private const int DefaultCapacity = 256;
+
+    /// <summary>
+    /// Rents a StringBuilder from the pool.
+    /// </summary>
+    public static StringBuilder Rent()
+    {
+        if (Pool.TryTake(out var sb))
+        {
+            return sb;
+        }
+        return new StringBuilder(DefaultCapacity);
+    }
+
+    /// <summary>
+    /// Returns a StringBuilder to the pool.
+    /// </summary>
+    public static void Return(StringBuilder sb)
+    {
+        if (sb.Capacity <= 8192 && Pool.Count < MaxPoolSize)
+        {
+            sb.Clear();
+            Pool.Add(sb);
         }
     }
 }

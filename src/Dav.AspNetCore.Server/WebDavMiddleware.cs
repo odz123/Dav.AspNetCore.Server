@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Dav.AspNetCore.Server.Http;
 using Dav.AspNetCore.Server.Store;
 using Microsoft.AspNetCore.Authentication;
@@ -7,7 +8,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Dav.AspNetCore.Server;
 
-internal class WebDavMiddleware
+internal sealed partial class WebDavMiddleware
 {
     private readonly WebDavOptions webDavOptions;
     private readonly ILogger<WebDavMiddleware> logger;
@@ -36,7 +37,7 @@ internal class WebDavMiddleware
     /// <exception cref="InvalidOperationException"></exception>
     public async Task InvokeAsync(HttpContext context)
     {
-        var middlewareStart = DateTime.UtcNow;
+        var stopwatch = Stopwatch.StartNew();
 
         if (webDavOptions.RequiresAuthentication &&
             context.Request.Method != WebDavMethods.Options &&
@@ -49,20 +50,20 @@ internal class WebDavMiddleware
         var resourceStore = context.RequestServices.GetService<IStore>();
         if (resourceStore == null)
             throw new InvalidOperationException("MapWebDav was used but it was never added. Use AddWebDav during service configuration.");
-        
+
         if (!webDavOptions.DisableServerName)
             context.Response.Headers["Server"] = string.IsNullOrWhiteSpace(webDavOptions.ServerName)
                 ? DefaultServerName
                 : webDavOptions.ServerName;
-        
+
         if (!RequestHandlerFactory.TryGetRequestHandler(context.Request.Method, out var handler))
         {
-            logger.LogInformation($"Request {context.Request.Method} is not implemented.");
+            LogMethodNotImplemented(logger, context.Request.Method);
             context.Response.StatusCode = StatusCodes.Status501NotImplemented;
             return;
         }
-        
-        logger.LogInformation($"Request starting {context.Request.Method} {context.Request.Path}");
+
+        LogRequestStarting(logger, context.Request.Method, context.Request.Path);
 
         try
         {
@@ -70,12 +71,28 @@ internal class WebDavMiddleware
         }
         catch (Exception e)
         {
-            logger.LogError(e, $"Unexpected error while handling request {context.Request.Method} {context.Request.Path} {(DateTime.UtcNow - middlewareStart).TotalMilliseconds:F0}ms");
-            
+            stopwatch.Stop();
+            LogRequestError(logger, e, context.Request.Method, context.Request.Path, stopwatch.ElapsedMilliseconds);
+
             if (!context.Response.HasStarted)
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            return;
         }
-        
-        logger.LogInformation($"Request finished {context.Request.Method} {context.Request.Path} {context.Response.StatusCode} {(DateTime.UtcNow - middlewareStart).TotalMilliseconds:F0}ms");
+
+        stopwatch.Stop();
+        LogRequestFinished(logger, context.Request.Method, context.Request.Path, context.Response.StatusCode, stopwatch.ElapsedMilliseconds);
     }
+
+    // Source-generated logging methods for zero-allocation logging
+    [LoggerMessage(Level = LogLevel.Information, Message = "Request {Method} is not implemented")]
+    private static partial void LogMethodNotImplemented(ILogger logger, string method);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Request starting {Method} {Path}")]
+    private static partial void LogRequestStarting(ILogger logger, string method, PathString path);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Unexpected error while handling request {Method} {Path} in {ElapsedMs}ms")]
+    private static partial void LogRequestError(ILogger logger, Exception exception, string method, PathString path, long elapsedMs);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Request finished {Method} {Path} {StatusCode} in {ElapsedMs}ms")]
+    private static partial void LogRequestFinished(ILogger logger, string method, PathString path, int statusCode, long elapsedMs);
 }

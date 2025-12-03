@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Xml.Linq;
 using Dav.AspNetCore.Server.Http;
@@ -9,14 +8,15 @@ using Microsoft.AspNetCore.Http.Features;
 
 namespace Dav.AspNetCore.Server.Handlers;
 
-internal class GetHandler : RequestHandler
+/// <summary>
+/// Handles HTTP GET and HEAD requests for WebDAV resources.
+/// Optimized for fast streaming with zero-copy file transfers.
+/// </summary>
+internal sealed class GetHandler : RequestHandler
 {
     /// <summary>
     /// Handles the web dav request async.
-    /// Optimized for fast stream starts and efficient seeking.
     /// </summary>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns></returns>
     protected override async Task HandleRequestAsync(CancellationToken cancellationToken = default)
     {
         if (Item == null)
@@ -25,117 +25,67 @@ internal class GetHandler : RequestHandler
             return;
         }
 
+        // Get request headers
         var requestHeaders = Context.Request.GetTypedHeaders();
+        var isHeadRequest = Context.Request.Method == WebDavMethods.Head;
 
-        // OPTIMIZATION: Determine access pattern early (before opening stream)
-        // This allows us to use appropriate FileOptions and avoid unnecessary stream opens
+        // Check for range request
         var hasRangeRequest = requestHeaders.Range != null &&
-                             requestHeaders.Range.Unit.Equals("bytes") &&
-                             requestHeaders.Range.Ranges.Count == 1;
+                              requestHeaders.Range.Unit.Equals("bytes") &&
+                              requestHeaders.Range.Ranges.Count == 1;
 
-        // Check for optimized streaming interface
+        // Get file info
         var optimizedItem = Item as IOptimizedStreamable;
         var physicalFile = Item as IPhysicalFileInfo;
         var physicalPath = physicalFile?.PhysicalPath;
         var hasPhysicalPath = !string.IsNullOrEmpty(physicalPath);
 
-        // OPTIMIZATION: For HEAD requests with IOptimizedStreamable, avoid opening stream entirely
-        var isHeadRequest = Context.Request.Method == WebDavMethods.Head;
-
-        // Get content length early - without opening stream if possible
+        // Get content length - prefer cached metadata
         long contentLength;
         if (optimizedItem != null)
         {
-            // Fast path: get length from cached metadata
             contentLength = optimizedItem.Length;
         }
         else
         {
-            // Fallback: parse from properties
-            var contentLengthStr = await GetNonExpensivePropertyAsync(Item, XmlNames.GetContentLength, cancellationToken);
-            contentLength = long.TryParse(contentLengthStr, out var len) ? len : -1L;
+            var contentLengthResult = await PropertyManager.GetPropertyAsync(Item, XmlNames.GetContentLength, cancellationToken);
+            contentLength = long.TryParse(contentLengthResult.Value?.ToString(), out var len) ? len : -1L;
         }
 
-        // ULTRA-FAST PATH: Try instant response for hot files with physical paths
-        // This bypasses all property fetching for maximum TTFB reduction
-        if (hasPhysicalPath && contentLength > 0)
-        {
-            var streamingPrep = NzbStreamingOptimizer.Instance.PrepareForStreaming(
-                Context, physicalPath!, contentLength, hasRangeRequest);
+        // Fetch essential properties
+        var contentType = await GetPropertyValueAsync(XmlNames.GetContentType, cancellationToken);
+        var etag = await GetPropertyValueAsync(XmlNames.GetEtag, cancellationToken);
+        var lastModified = await GetPropertyValueAsync(XmlNames.GetLastModified, cancellationToken);
 
-            if (streamingPrep.InstantEntry != null && streamingPrep.IsHotFile)
-            {
-                // Validate the instant entry hasn't expired
-                var instantEntry = streamingPrep.InstantEntry;
-                if (instantEntry.IsValid())
-                {
-                    // Handle HEAD request with instant response
-                    if (isHeadRequest)
-                    {
-                        instantEntry.ApplyHeaders(Context.Response);
-                        Context.SetResult(DavStatusCode.Ok);
-                        return;
-                    }
+        // Set response headers
+        SetResponseHeaders(contentType, etag, lastModified, contentLength);
 
-                    // Handle GET with instant response path
-                    await HandleInstantResponseAsync(
-                        physicalPath!, instantEntry, hasRangeRequest, streamingPrep, cancellationToken);
-                    return;
-                }
-            }
-        }
+        // Check If-Range condition
+        var disableRanges = CheckIfRangeCondition(requestHeaders, etag, lastModified);
 
-        // Fetch essential properties in parallel
-        var properties = await GetPropertiesParallelAsync(Item, cancellationToken);
-
-        // Set response headers early to reduce TTFB
-        SetResponseHeaders(properties, contentLength);
-
-        // Determine if ranges should be disabled based on IfRange
-        var disableRanges = CheckIfRangeCondition(requestHeaders, properties);
-
-        // OPTIMIZATION: Handle HEAD requests without opening the stream
+        // Handle HEAD request without opening stream
         if (isHeadRequest)
         {
-            await HandleHeadRequestAsync(contentLength, hasPhysicalPath || optimizedItem != null);
+            Context.Response.Headers["Accept-Ranges"] = hasPhysicalPath || (optimizedItem != null && contentLength > 0)
+                ? ResponseHeaderCache.AcceptRangesBytes
+                : ResponseHeaderCache.AcceptRangesNone;
+
+            if (contentLength >= 0)
+                Context.Response.ContentLength = contentLength;
+
+            Context.SetResult(DavStatusCode.Ok);
             return;
         }
 
-        // Determine the actual access pattern for stream optimization
+        // Determine access pattern
         var accessPattern = (hasRangeRequest && !disableRanges)
             ? FileAccessPattern.RandomAccess
             : FileAccessPattern.Sequential;
 
-        // OPTIMIZATION: Apply socket-level tuning for streaming performance
-        var isInitialRangeForTuning = hasRangeRequest &&
-            requestHeaders.Range!.Ranges.First().From.GetValueOrDefault(0) < InitialRangePrioritizer.InitialRangeThreshold;
-        StreamingConnectionTuner.TuneForStreaming(Context, contentLength, isInitialRangeForTuning);
-
-        // OPTIMIZATION: Warmup connection for large transfers and apply ultra-low latency for initial ranges
-        if (contentLength > 10 * 1024 * 1024)
-        {
-            StreamingConnectionTuner.WarmupConnection(Context, contentLength);
-        }
-        else if (isInitialRangeForTuning)
-        {
-            // For initial range requests, apply ultra-low latency settings
-            var socket = GetSocketFromContext(Context);
-            if (socket != null)
-            {
-                StreamingConnectionTuner.ApplyUltraLowLatencySettings(socket);
-            }
-        }
-
-        // OPTIMIZATION: For physical files with SendFile support, use zero-copy transfer
+        // For physical files, use zero-copy SendFile
         if (hasPhysicalPath && !disableRanges)
         {
-            // Notify speculative prefetcher about stream start for full file downloads
-            if (!hasRangeRequest && contentLength > 0)
-            {
-                SpeculativeSegmentPrefetcher.Instance.OnStreamStart(physicalPath!, contentLength);
-            }
-
-            await SendFileZeroCopyAsync(physicalPath!, contentLength, hasRangeRequest, cancellationToken);
+            await SendFileAsync(physicalPath!, contentLength, hasRangeRequest, cancellationToken);
             return;
         }
 
@@ -143,12 +93,10 @@ internal class GetHandler : RequestHandler
         Stream readableStream;
         if (optimizedItem != null)
         {
-            // Use optimized stream with appropriate FileOptions
             readableStream = await optimizedItem.GetOptimizedReadableStreamAsync(accessPattern, cancellationToken);
         }
         else
         {
-            // Fallback to regular stream
             readableStream = await Item.GetReadableStreamAsync(cancellationToken);
         }
 
@@ -156,183 +104,34 @@ internal class GetHandler : RequestHandler
         {
             if (hasRangeRequest && !disableRanges && readableStream.CanSeek)
             {
-                await SendRangeDataAsync(Context, readableStream, cancellationToken);
+                await SendRangeAsync(readableStream, cancellationToken);
             }
             else
             {
-                await SendFullDataAsync(Context, readableStream, contentLength, cancellationToken);
+                await SendFullContentAsync(readableStream, contentLength, cancellationToken);
             }
         }
     }
 
     /// <summary>
-    /// Handles requests using instant response path for hot files.
-    /// Achieves sub-millisecond TTFB by using pre-cached headers and optimized streaming.
+    /// Sets response headers from file properties.
     /// </summary>
-    private async Task HandleInstantResponseAsync(
-        string physicalPath,
-        InstantResponseEntry instantEntry,
-        bool hasRangeRequest,
-        StreamingPreparation streamingPrep,
-        CancellationToken cancellationToken)
+    private void SetResponseHeaders(string? contentType, string? etag, string? lastModified, long contentLength)
     {
-        var requestHeaders = Context.Request.GetTypedHeaders();
-        var contentLength = instantEntry.ContentLength;
-        var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
+        if (!string.IsNullOrWhiteSpace(contentType))
+            Context.Response.Headers["Content-Type"] = contentType;
 
-        // Apply pre-computed headers for instant response
-        Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
+        if (!string.IsNullOrWhiteSpace(lastModified))
+            Context.Response.Headers["Last-Modified"] = lastModified;
 
-        if (hasRangeRequest)
-        {
-            var range = requestHeaders.Range!.Ranges.First();
-
-            // Calculate range using cached content length
-            if (!TryCalculateRange(range, contentLength, out var offset, out var length))
-            {
-                Context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-                Context.Response.Headers["Content-Range"] = $"bytes */{contentLength}";
-                return;
-            }
-
-            // Record seek for pattern learning
-            NzbStreamingOptimizer.Instance.RecordSeek(Context, physicalPath, offset, length);
-
-            // Apply instant headers for range request
-            instantEntry.ApplyRangeHeaders(Context.Response, offset, length);
-            Context.SetResult(DavStatusCode.PartialContent);
-
-            // Flush headers immediately for fastest TTFB
-            await NzbStreamingOptimizer.Instance.FlushHeadersInstantAsync(Context, cancellationToken);
-
-            // Use optimal handle from cache if available
-            var handle = NzbStreamingOptimizer.Instance.GetOptimalHandle(physicalPath, FileAccessPattern.RandomAccess);
-            if (handle != null)
-            {
-                try
-                {
-                    // Apply kernel hints for the seek
-                    if (LinuxKernelHints.IsAvailable)
-                    {
-                        var fd = handle.FileDescriptor;
-                        if (fd >= 0)
-                        {
-                            LinuxKernelHints.AdviseWillNeed(fd, offset, length);
-                        }
-                    }
-
-                    // CreatePositionedStream returns an independent stream that must be disposed
-                    await using var stream = handle.CreatePositionedStream(offset);
-                    var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(physicalPath);
-                    await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                finally
-                {
-                    handle.Dispose();
-                }
-            }
-            else if (responseBodyFeature != null)
-            {
-                // Fallback to SendFile
-                await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
-        else
-        {
-            // Full file transfer with instant headers
-            instantEntry.ApplyHeaders(Context.Response);
-            Context.SetResult(DavStatusCode.Ok);
-
-            // Notify prefetcher about stream start
-            SpeculativeSegmentPrefetcher.Instance.OnStreamStart(physicalPath, contentLength);
-
-            // Flush headers immediately
-            await NzbStreamingOptimizer.Instance.FlushHeadersInstantAsync(Context, cancellationToken);
-
-            // Use SendFile for zero-copy transfer
-            if (responseBodyFeature != null)
-            {
-                await responseBodyFeature.SendFileAsync(physicalPath, 0, contentLength, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            else
-            {
-                // Fallback to stream copy
-                var handle = NzbStreamingOptimizer.Instance.GetOptimalHandle(physicalPath, FileAccessPattern.Sequential);
-                if (handle != null)
-                {
-                    try
-                    {
-                        var stream = handle.Stream;
-                        var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(physicalPath);
-                        await stream.CopyToPooledPipelinedAsync(Context.Response.Body, bufferSize, cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        handle.Dispose();
-                    }
-                }
-            }
-        }
-
-        // Record successful completion for learning
-        NzbStreamingOptimizer.Instance.RecordStreamComplete(
-            physicalPath,
-            contentLength,
-            instantEntry.ContentType,
-            instantEntry.ETagHeader?.Trim('"'),
-            instantEntry.LastModified,
-            contentLength,
-            0);
-    }
-
-    /// <summary>
-    /// Handles HEAD requests without opening the file stream.
-    /// This is a significant optimization for clients that probe file metadata.
-    /// </summary>
-    private Task HandleHeadRequestAsync(long contentLength, bool supportsRanges)
-    {
-        // Use pre-computed header values for faster response
-        Context.Response.Headers["Accept-Ranges"] = supportsRanges
-            ? ResponseHeaderCache.AcceptRangesBytes
-            : ResponseHeaderCache.AcceptRangesNone;
-
-        if (contentLength >= 0)
-        {
-            Context.Response.ContentLength = contentLength;
-        }
-
-        AddStreamingHeaders(Context, Context.Response.ContentType, contentLength);
-        Context.SetResult(DavStatusCode.Ok);
-        return Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// Sets response headers from pre-fetched properties.
-    /// Called early to reduce time-to-first-byte.
-    /// </summary>
-    private void SetResponseHeaders(FilePropertySet properties, long contentLength)
-    {
-        if (!string.IsNullOrWhiteSpace(properties.ContentType))
-            Context.Response.Headers["Content-Type"] = properties.ContentType;
-
-        if (!string.IsNullOrWhiteSpace(properties.ContentLanguage))
-            Context.Response.Headers["Content-Language"] = properties.ContentLanguage;
-
-        if (!string.IsNullOrWhiteSpace(properties.LastModified))
-            Context.Response.Headers["Last-Modified"] = properties.LastModified;
-
-        if (!string.IsNullOrWhiteSpace(properties.ETag))
-            Context.Response.Headers["ETag"] = $"\"{properties.ETag}\"";
+        if (!string.IsNullOrWhiteSpace(etag))
+            Context.Response.Headers["ETag"] = $"\"{etag}\"";
 
         if (contentLength >= 0)
             Context.Response.Headers["Content-Length"] = contentLength.ToString();
 
-        // Add Content-Disposition header for file downloads
-        var fileName = GetFileName(Item!.Uri);
+        // Add Content-Disposition header
+        var fileName = GetFileName();
         if (!string.IsNullOrWhiteSpace(fileName))
         {
             var encodedFileName = WebUtility.UrlEncode(fileName);
@@ -341,27 +140,28 @@ internal class GetHandler : RequestHandler
     }
 
     /// <summary>
-    /// Checks If-Range precondition and returns whether ranges should be disabled.
+    /// Checks If-Range precondition.
     /// </summary>
     private static bool CheckIfRangeCondition(
         Microsoft.AspNetCore.Http.Headers.RequestHeaders requestHeaders,
-        FilePropertySet properties)
+        string? etag,
+        string? lastModified)
     {
         if (requestHeaders.IfRange == null)
             return false;
 
         // Check ETag mismatch
         if (requestHeaders.IfRange.EntityTag != null &&
-            !string.IsNullOrWhiteSpace(properties.ETag) &&
-            requestHeaders.IfRange.EntityTag.Tag != $"\"{properties.ETag}\"")
+            !string.IsNullOrWhiteSpace(etag) &&
+            requestHeaders.IfRange.EntityTag.Tag != $"\"{etag}\"")
         {
             return true;
         }
 
         // Check Last-Modified mismatch
         if (requestHeaders.IfRange.LastModified != null &&
-            !string.IsNullOrWhiteSpace(properties.LastModified) &&
-            DateTimeOffset.TryParse(properties.LastModified, out var parsedLastModified) &&
+            !string.IsNullOrWhiteSpace(lastModified) &&
+            DateTimeOffset.TryParse(lastModified, out var parsedLastModified) &&
             requestHeaders.IfRange.LastModified != parsedLastModified)
         {
             return true;
@@ -371,10 +171,9 @@ internal class GetHandler : RequestHandler
     }
 
     /// <summary>
-    /// Sends file using zero-copy SendFileAsync - the fastest possible method.
-    /// Handles both full file and range requests using kernel-level optimization.
+    /// Sends file using zero-copy SendFileAsync.
     /// </summary>
-    private async Task SendFileZeroCopyAsync(
+    private async Task SendFileAsync(
         string physicalPath,
         long contentLength,
         bool hasRangeRequest,
@@ -382,17 +181,14 @@ internal class GetHandler : RequestHandler
     {
         var requestHeaders = Context.Request.GetTypedHeaders();
         var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
-        var sw = Stopwatch.StartNew();
 
         Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
-        AddStreamingHeaders(Context, Context.Response.ContentType, contentLength);
 
-        // Handle range requests using SendFile with offset/length
+        // Handle range request
         if (hasRangeRequest)
         {
             var range = requestHeaders.Range!.Ranges.First();
 
-            // Calculate range parameters using known content length
             if (!TryCalculateRange(range, contentLength, out var offset, out var length))
             {
                 Context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
@@ -400,165 +196,35 @@ internal class GetHandler : RequestHandler
                 return;
             }
 
-            // OPTIMIZATION: Track seek pattern and get prefetch hints
-            var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
-            var (pattern, prefetchHint) = SeekPatternTracker.Instance.RecordAccessWithPrefetch(
-                filePath, offset, length, contentLength);
+            Context.SetResult(DavStatusCode.PartialContent);
+            Context.Response.ContentLength = length;
+            Context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, contentLength);
 
-            // OPTIMIZATION: Check if this is an initial range (first bytes) for priority handling
-            var isInitialRange = InitialRangePrioritizer.Instance.IsInitialRange(offset);
-            var prioritySlot = isInitialRange
-                ? await InitialRangePrioritizer.Instance.AcquirePrioritySlotAsync(offset, cancellationToken)
-                : null;
+            // Disable buffering and flush headers
+            responseBodyFeature?.DisableBuffering();
+            await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
 
-            try
+            if (responseBodyFeature != null)
             {
-                // OPTIMIZATION: For initial ranges, use smaller buffers for faster TTFB
-                var rangeSettings = InitialRangePrioritizer.Instance.GetSettings(offset, length);
-
-                // OPTIMIZATION: Trigger parallel chunk prefetch for initial ranges
-                if (isInitialRange)
-                {
-                    ParallelChunkPrefetcher.Instance.TriggerInitialPrefetch(physicalPath, contentLength);
-                }
-
-                // OPTIMIZATION: For sequential patterns, consider coalescing reads for efficiency
-                var shouldCoalesce = RangeCoalescer.Instance.ShouldUseReadAhead(filePath);
-
-                if (shouldCoalesce && !isInitialRange && pattern == FileAccessPattern.Sequential)
-                {
-                    var (_, coalescedLength) = RangeCoalescer.Instance.GetOptimizedRange(
-                        filePath, offset, length, contentLength);
-                    // Prefetch the coalesced region but only return the requested range
-                    if (coalescedLength > length)
-                    {
-                        // Queue prefetch for the extended region
-                        PrefetchService.Instance.QueuePrefetch(physicalPath, offset + length, coalescedLength - length);
-                    }
-                }
-
-                // Queue background prefetch for predicted next request
-                if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3)
-                {
-                    // Use adaptive prefetch sizing based on throughput
-                    var adaptivePrefetchSize = AdaptivePrefetch.Instance.GetOptimalPrefetchSize(filePath, contentLength);
-                    var adjustedHint = new PrefetchHint(
-                        prefetchHint.Value.PredictedOffset,
-                        Math.Max(prefetchHint.Value.PrefetchSize, adaptivePrefetchSize),
-                        prefetchHint.Value.Confidence);
-                    PrefetchService.Instance.QueuePrefetch(physicalPath, adjustedHint);
-                }
-
-                // OPTIMIZATION: Use Linux kernel hints to prefetch data ahead of time
-                if (LinuxKernelHints.IsAvailable)
-                {
-                    // For initial ranges, use aggressive readahead for ultra-fast TTFB
-                    if (isInitialRange)
-                    {
-                        LinuxKernelHints.PrefetchFileRange(physicalPath, offset, Math.Min(contentLength, 8 * 1024 * 1024));
-                    }
-                    else
-                    {
-                        LinuxKernelHints.PrefetchFileRange(physicalPath, offset, Math.Min(length * 2, 4 * 1024 * 1024));
-                    }
-                }
-
-                Context.SetResult(DavStatusCode.PartialContent);
-                Context.Response.ContentLength = length;
-                Context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, contentLength);
-
-                // OPTIMIZATION: Flush headers immediately to reduce seek response latency
-                await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
-
-                // OPTIMIZATION: Try memory-mapped file for random access patterns (fastest seeking)
-                if (pattern == FileAccessPattern.RandomAccess &&
-                    MemoryMappedFilePool.ShouldUseMemoryMapping(contentLength, pattern))
-                {
-                    var lastModified = System.IO.File.GetLastWriteTimeUtc(physicalPath);
-                    var mappedStream = MemoryMappedFilePool.Instance.GetMappedRangeStream(
-                        physicalPath, contentLength, lastModified, offset, length);
-
-                    if (mappedStream != null)
-                    {
-                        await using (mappedStream)
-                        {
-                            // Use adaptive buffer size based on throughput
-                            var bufferSize = isInitialRange
-                                ? rangeSettings.BufferSize
-                                : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
-                            await mappedStream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
-                        }
-
-                        // Record throughput for adaptive prefetching
-                        sw.Stop();
-                        AdaptivePrefetch.Instance.RecordThroughput(filePath, length, sw.ElapsedMilliseconds);
-                        SpeculativeSegmentPrefetcher.Instance.OnReadComplete(physicalPath, offset, length, contentLength, sw.ElapsedMilliseconds);
-
-                        // Record initial range served for priority tracking
-                        if (isInitialRange)
-                        {
-                            InitialRangePrioritizer.Instance.RecordInitialRangeServed(filePath, offset, length);
-                        }
-                        return;
-                    }
-                }
-
-                if (responseBodyFeature != null)
-                {
-                    // Zero-copy range transfer - kernel handles seeking
-                    await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    // Fallback: open stream with pattern-based hint
-                    await using var stream = OptimizedFileStream.OpenForRead(physicalPath, pattern);
-
-                    // OPTIMIZATION: Apply Linux kernel hints
-                    if (LinuxKernelHints.IsAvailable)
-                    {
-                        LinuxKernelHints.ApplyStreamingHints(stream, pattern, offset, length);
-                    }
-
-                    stream.Seek(offset, SeekOrigin.Begin);
-                    var bufferSize = isInitialRange
-                        ? rangeSettings.BufferSize
-                        : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
-                    await stream.CopyToPooledAsync(Context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
-                }
-
-                // Record throughput for adaptive prefetching
-                sw.Stop();
-                AdaptivePrefetch.Instance.RecordThroughput(filePath, length, sw.ElapsedMilliseconds);
-                SpeculativeSegmentPrefetcher.Instance.OnReadComplete(physicalPath, offset, length, contentLength, sw.ElapsedMilliseconds);
-
-                // Record initial range served for priority tracking
-                if (isInitialRange)
-                {
-                    InitialRangePrioritizer.Instance.RecordInitialRangeServed(filePath, offset, length);
-                }
+                await responseBodyFeature.SendFileAsync(physicalPath, offset, length, cancellationToken).ConfigureAwait(false);
             }
-            finally
+            else
             {
-                prioritySlot?.Dispose();
+                // Fallback to stream
+                await using var stream = new FileStream(physicalPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    BufferPool.DefaultBufferSize, FileOptions.Asynchronous | FileOptions.RandomAccess);
+                stream.Seek(offset, SeekOrigin.Begin);
+                await stream.CopyToPooledAsync(Context.Response.Body, length, BufferPool.GetOptimalBufferSize(length), cancellationToken).ConfigureAwait(false);
             }
             return;
         }
 
-        // Full file transfer using SendFileAsync (zero-copy)
+        // Full file transfer
         Context.SetResult(DavStatusCode.Ok);
         Context.Response.ContentLength = contentLength;
 
-        // OPTIMIZATION: Preload file metadata cache for subsequent requests
-        var filePathForCache = Item?.Uri.AbsolutePath ?? string.Empty;
-        FileMetadataCache.Instance.Preload(physicalPath);
-
-        // OPTIMIZATION: Apply Linux kernel hints for sequential read
-        if (LinuxKernelHints.IsAvailable)
-        {
-            LinuxKernelHints.PrefetchFileRange(physicalPath, 0, Math.Min(contentLength, 8 * 1024 * 1024));
-        }
-
-        // OPTIMIZATION: Flush headers early for faster TTFB
+        // Disable buffering and flush headers
+        responseBodyFeature?.DisableBuffering();
         await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
 
         if (responseBodyFeature != null)
@@ -567,27 +233,79 @@ internal class GetHandler : RequestHandler
         }
         else
         {
-            // Fallback: open stream with Sequential hint for read-ahead
-            await using var stream = OptimizedFileStream.OpenForSequentialRead(physicalPath);
-
-            // OPTIMIZATION: Apply Linux kernel hints
-            if (LinuxKernelHints.IsAvailable)
-            {
-                LinuxKernelHints.ApplyStreamingHints(stream, FileAccessPattern.Sequential, 0, contentLength);
-            }
-
-            var bufferSize = AdaptivePrefetch.Instance.GetOptimalBufferSize(filePathForCache);
-            await stream.CopyToPooledAsync(Context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+            // Fallback to stream
+            await using var stream = new FileStream(physicalPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                BufferPool.LargeBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await stream.CopyToPooledPipelinedAsync(Context.Response.Body, BufferPool.GetOptimalBufferSize(contentLength), cancellationToken).ConfigureAwait(false);
         }
-
-        // Record throughput for adaptive prefetching
-        sw.Stop();
-        AdaptivePrefetch.Instance.RecordThroughput(filePathForCache, contentLength, sw.ElapsedMilliseconds);
     }
 
     /// <summary>
-    /// Tries to calculate the byte range from a range header.
-    /// Returns false if the range is unsatisfiable.
+    /// Sends range data from a stream.
+    /// </summary>
+    private async Task SendRangeAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        var requestHeaders = Context.Request.GetTypedHeaders();
+        var range = requestHeaders.Range!.Ranges.First();
+        var streamLength = stream.Length;
+
+        if (!TryCalculateRange(range, streamLength, out var offset, out var length))
+        {
+            Context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
+            Context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
+            return;
+        }
+
+        stream.Seek(offset, SeekOrigin.Begin);
+
+        Context.SetResult(DavStatusCode.PartialContent);
+        Context.Response.ContentLength = length;
+        Context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, streamLength);
+        Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
+
+        // Disable buffering and flush headers
+        var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
+        responseBodyFeature?.DisableBuffering();
+        await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
+        await stream.CopyToPooledAsync(Context.Response.Body, length, BufferPool.GetOptimalBufferSize(length), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends full file content from a stream.
+    /// </summary>
+    private async Task SendFullContentAsync(Stream stream, long contentLength, CancellationToken cancellationToken)
+    {
+        Context.SetResult(DavStatusCode.Ok);
+
+        if (stream.CanSeek)
+        {
+            Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
+            Context.Response.ContentLength = stream.Length;
+        }
+        else
+        {
+            Context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesNone;
+        }
+
+        // Disable buffering and flush headers
+        var responseBodyFeature = Context.Features.Get<IHttpResponseBodyFeature>();
+        responseBodyFeature?.DisableBuffering();
+        await Context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
+
+        var bufferSize = BufferPool.GetOptimalBufferSize(contentLength);
+        if (contentLength > BufferPool.StreamingThreshold)
+        {
+            await stream.CopyToPooledPipelinedAsync(Context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await stream.CopyToPooledAsync(Context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Calculates byte range from a range header.
     /// </summary>
     private static bool TryCalculateRange(
         Microsoft.Net.Http.Headers.RangeItemHeaderValue range,
@@ -634,258 +352,27 @@ internal class GetHandler : RequestHandler
     }
 
     /// <summary>
-    /// Sends range data from a stream (for non-physical files).
+    /// Gets a property value.
     /// </summary>
-    private async Task SendRangeDataAsync(
-        HttpContext context,
-        Stream stream,
-        CancellationToken cancellationToken)
+    private async Task<string?> GetPropertyValueAsync(XName propertyName, CancellationToken cancellationToken)
     {
-        var requestHeaders = context.Request.GetTypedHeaders();
-        var range = requestHeaders.Range!.Ranges.First();
-        var streamLength = stream.Length;
-        var sw = Stopwatch.StartNew();
-
-        if (!TryCalculateRange(range, streamLength, out var offset, out var length))
-        {
-            context.SetResult(DavStatusCode.RequestedRangeNotSatisfiable);
-            context.Response.Headers["Content-Range"] = $"bytes */{streamLength}";
-            return;
-        }
-
-        // OPTIMIZATION: Track seek pattern and get prefetch hints
-        var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
-        var (pattern, prefetchHint) = SeekPatternTracker.Instance.RecordAccessWithPrefetch(
-            filePath, offset, length, streamLength);
-
-        // OPTIMIZATION: Check if this is an initial range for priority handling
-        var isInitialRange = InitialRangePrioritizer.Instance.IsInitialRange(offset);
-        var rangeSettings = InitialRangePrioritizer.Instance.GetSettings(offset, length);
-
-        // Queue background prefetch for predicted next request (if physical path available)
-        var physicalFile = Item as IPhysicalFileInfo;
-        if (prefetchHint.HasValue && prefetchHint.Value.Confidence >= 3 &&
-            !string.IsNullOrEmpty(physicalFile?.PhysicalPath))
-        {
-            // Use adaptive prefetch sizing based on throughput
-            var adaptivePrefetchSize = AdaptivePrefetch.Instance.GetOptimalPrefetchSize(filePath, streamLength);
-            var adjustedHint = new PrefetchHint(
-                prefetchHint.Value.PredictedOffset,
-                Math.Max(prefetchHint.Value.PrefetchSize, adaptivePrefetchSize),
-                prefetchHint.Value.Confidence);
-            PrefetchService.Instance.QueuePrefetch(physicalFile.PhysicalPath, adjustedHint);
-        }
-
-        // OPTIMIZATION: Apply Linux kernel hints if stream is FileStream
-        if (LinuxKernelHints.IsAvailable && stream is FileStream fileStream)
-        {
-            LinuxKernelHints.ApplyStreamingHints(fileStream, pattern, offset, length);
-        }
-
-        // Seek to the start position
-        stream.Seek(offset, SeekOrigin.Begin);
-
-        context.SetResult(DavStatusCode.PartialContent);
-        context.Response.ContentLength = length;
-        context.Response.Headers["Content-Range"] = ResponseHeaderCache.GetContentRangeHeader(offset, offset + length - 1, streamLength);
-        context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
-
-        // OPTIMIZATION: Flush headers immediately for fast seek response
-        await context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
-
-        // OPTIMIZATION: Use appropriate buffer size based on range type and throughput
-        var bufferSize = isInitialRange
-            ? rangeSettings.BufferSize
-            : AdaptivePrefetch.Instance.GetOptimalBufferSize(filePath);
-
-        await stream.CopyToPooledAsync(context.Response.Body, length, bufferSize, cancellationToken).ConfigureAwait(false);
-
-        // Record throughput for adaptive prefetching
-        sw.Stop();
-        AdaptivePrefetch.Instance.RecordThroughput(filePath, length, sw.ElapsedMilliseconds);
-
-        // Record initial range served for priority tracking
-        if (isInitialRange)
-        {
-            InitialRangePrioritizer.Instance.RecordInitialRangeServed(filePath, offset, length);
-        }
-    }
-
-    /// <summary>
-    /// Sends full file data from a stream.
-    /// </summary>
-    private async Task SendFullDataAsync(
-        HttpContext context,
-        Stream stream,
-        long contentLength,
-        CancellationToken cancellationToken)
-    {
-        var sw = Stopwatch.StartNew();
-        var filePath = Item?.Uri.AbsolutePath ?? string.Empty;
-
-        context.SetResult(DavStatusCode.Ok);
-
-        if (stream.CanSeek)
-        {
-            context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesBytes;
-            context.Response.ContentLength = stream.Length;
-        }
-        else
-        {
-            context.Response.Headers["Accept-Ranges"] = ResponseHeaderCache.AcceptRangesNone;
-        }
-
-        AddStreamingHeaders(context, context.Response.ContentType, contentLength);
-
-        // OPTIMIZATION: Apply Linux kernel hints if stream is FileStream
-        if (LinuxKernelHints.IsAvailable && stream is FileStream fileStream)
-        {
-            LinuxKernelHints.ApplyStreamingHints(fileStream, FileAccessPattern.Sequential, 0, contentLength);
-        }
-
-        // OPTIMIZATION: Flush headers immediately to reduce TTFB
-        // This allows the client to start processing headers while we read the file
-        await context.Response.StartAsync(cancellationToken).ConfigureAwait(false);
-
-        // Use optimal buffer size for sequential reads
-        var bufferSize = OptimizedFileStream.GetOptimalBufferSize(contentLength, FileAccessPattern.Sequential);
-
-        // OPTIMIZATION: Use pipelined copy for large files to overlap read and write operations
-        if (contentLength > BufferPool.StreamingThreshold)
-        {
-            await stream.CopyToPooledPipelinedAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            await stream.CopyToPooledAsync(context.Response.Body, bufferSize, cancellationToken).ConfigureAwait(false);
-        }
-
-        // Record throughput for adaptive prefetching
-        sw.Stop();
-        AdaptivePrefetch.Instance.RecordThroughput(filePath, contentLength, sw.ElapsedMilliseconds);
-    }
-
-    /// <summary>
-    /// Cached property results for a single request.
-    /// </summary>
-    private readonly record struct FilePropertySet(
-        string? ContentType,
-        string? ContentLanguage,
-        string? LastModified,
-        string? ETag,
-        string? ContentLength);
-
-    /// <summary>
-    /// Fetches all properties in parallel for better performance.
-    /// </summary>
-    private async Task<FilePropertySet> GetPropertiesParallelAsync(
-        IStoreItem item,
-        CancellationToken cancellationToken)
-    {
-        // Run all property fetches in parallel
-        var contentTypeTask = GetNonExpensivePropertyAsync(item, XmlNames.GetContentType, cancellationToken);
-        var contentLanguageTask = GetNonExpensivePropertyAsync(item, XmlNames.GetContentLanguage, cancellationToken);
-        var lastModifiedTask = GetNonExpensivePropertyAsync(item, XmlNames.GetLastModified, cancellationToken);
-        var etagTask = GetNonExpensivePropertyAsync(item, XmlNames.GetEtag, cancellationToken);
-        var contentLengthTask = GetNonExpensivePropertyAsync(item, XmlNames.GetContentLength, cancellationToken);
-
-        await Task.WhenAll(contentTypeTask, contentLanguageTask, lastModifiedTask, etagTask, contentLengthTask);
-
-        return new FilePropertySet(
-            await contentTypeTask,
-            await contentLanguageTask,
-            await lastModifiedTask,
-            await etagTask,
-            await contentLengthTask);
-    }
-
-    private async Task<string?> GetNonExpensivePropertyAsync(
-        IStoreItem item,
-        XName propertyName,
-        CancellationToken cancellationToken = default)
-    {
-        var metadata = PropertyManager.GetPropertyMetadata(item, propertyName);
-        if (metadata == null || metadata.Expensive)
+        var metadata = PropertyManager.GetPropertyMetadata(Item!, propertyName);
+        if (metadata?.Expensive == true)
             return null;
 
-        var result = await PropertyManager.GetPropertyAsync(item, propertyName, cancellationToken);
-        return (string?)result.Value;
+        var result = await PropertyManager.GetPropertyAsync(Item!, propertyName, cancellationToken);
+        return result.Value?.ToString();
     }
 
     /// <summary>
-    /// Extracts the file name from a URI.
+    /// Gets the file name from the item URI.
     /// </summary>
-    private static string? GetFileName(Uri uri)
+    private string? GetFileName()
     {
-        var path = uri.AbsolutePath;
+        var path = Item!.Uri.AbsolutePath;
         var lastSlash = path.LastIndexOf('/');
         if (lastSlash >= 0 && lastSlash < path.Length - 1)
             return Uri.UnescapeDataString(path[(lastSlash + 1)..]);
         return null;
-    }
-
-    /// <summary>
-    /// Adds streaming-optimized headers to the response using pre-computed values.
-    /// </summary>
-    private static void AddStreamingHeaders(HttpContext context, string? contentType, long contentLength)
-    {
-        // Allow clients to cache streamable content
-        if (IsStreamableContent(contentType))
-        {
-            // Use pre-computed header value
-            context.Response.Headers["Cache-Control"] = ResponseHeaderCache.CacheControlStreaming;
-        }
-
-        // Disable response buffering for streaming - critical for fast TTFB
-        var bufferingFeature = context.Features.Get<IHttpResponseBodyFeature>();
-        bufferingFeature?.DisableBuffering();
-
-        // For large files, hint that the connection should be kept alive
-        if (contentLength > BufferPool.StreamingThreshold)
-        {
-            context.Response.Headers["Connection"] = ResponseHeaderCache.ConnectionKeepAlive;
-            context.Response.Headers["Keep-Alive"] = ResponseHeaderCache.GetKeepAliveHeader(120);
-        }
-    }
-
-    /// <summary>
-    /// Determines if content type is streamable (video, audio, etc.).
-    /// </summary>
-    private static bool IsStreamableContent(string? contentType)
-    {
-        if (string.IsNullOrEmpty(contentType))
-            return false;
-
-        return contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
-               contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
-               contentType.Equals("application/x-nzb", StringComparison.OrdinalIgnoreCase) ||
-               contentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Attempts to get the underlying socket from the HTTP context.
-    /// Used for applying low-level socket optimizations.
-    /// </summary>
-    private static System.Net.Sockets.Socket? GetSocketFromContext(HttpContext context)
-    {
-        try
-        {
-            var connectionInfo = context.Connection;
-            if (connectionInfo == null)
-                return null;
-
-            var connectionType = connectionInfo.GetType();
-            var socketProperty = connectionType.GetProperty("Socket");
-            if (socketProperty != null)
-            {
-                return socketProperty.GetValue(connectionInfo) as System.Net.Sockets.Socket;
-            }
-
-            return null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 }
