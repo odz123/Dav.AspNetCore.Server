@@ -1,4 +1,3 @@
-using Dav.AspNetCore.Server.Performance;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Dav.AspNetCore.Server;
@@ -20,59 +19,25 @@ public class WebDavOptionsBuilder : WebDavOptions
     public IServiceCollection Services { get; }
 
     /// <summary>
-    /// Configures the server for NZB/Usenet streaming workloads.
-    /// Enables fast ETags, optimized buffering, and zero-copy transfers.
+    /// Configures the server for high-performance streaming workloads.
+    /// Enables fast ETags and optimized file handling.
     /// </summary>
     /// <returns>The options builder for chaining.</returns>
-    public WebDavOptionsBuilder UseNzbStreaming()
+    public WebDavOptionsBuilder UseHighPerformance()
     {
-        Streaming = StreamingOptions.ForNzbStreaming();
+        UseFastETag = true;
+        FastETagThreshold = 0; // Always use fast ETags
         return this;
     }
 
     /// <summary>
-    /// Configures the server for video streaming workloads.
-    /// Enables fast ETags and optimized range request handling.
+    /// Configures the server to always compute content-based ETags.
+    /// This is slower but provides stronger cache validation.
     /// </summary>
     /// <returns>The options builder for chaining.</returns>
-    public WebDavOptionsBuilder UseVideoStreaming()
+    public WebDavOptionsBuilder UseContentBasedETags()
     {
-        Streaming = StreamingOptions.ForVideoStreaming();
-        return this;
-    }
-
-    /// <summary>
-    /// Configures the server for low-latency access.
-    /// Prioritizes time-to-first-byte over throughput.
-    /// </summary>
-    /// <returns>The options builder for chaining.</returns>
-    public WebDavOptionsBuilder UseLowLatency()
-    {
-        Streaming = StreamingOptions.ForLowLatency();
-        return this;
-    }
-
-    /// <summary>
-    /// Configures the server for ultra-low latency NZB streaming.
-    /// Combines all optimizations for the absolute fastest stream starts and seeks.
-    /// Enables memory-mapped files, predictive prefetching, and metadata caching.
-    /// </summary>
-    /// <returns>The options builder for chaining.</returns>
-    public WebDavOptionsBuilder UseUltraLowLatencyNzb()
-    {
-        Streaming = StreamingOptions.ForUltraLowLatencyNzb();
-        return this;
-    }
-
-    /// <summary>
-    /// Configures custom streaming options.
-    /// </summary>
-    /// <param name="configure">Action to configure streaming options.</param>
-    /// <returns>The options builder for chaining.</returns>
-    public WebDavOptionsBuilder UseStreaming(Action<StreamingOptions> configure)
-    {
-        Streaming = new StreamingOptions();
-        configure(Streaming);
+        UseFastETag = false;
         return this;
     }
 }

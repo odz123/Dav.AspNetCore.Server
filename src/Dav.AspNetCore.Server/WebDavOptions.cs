@@ -1,5 +1,3 @@
-using Dav.AspNetCore.Server.Performance;
-
 namespace Dav.AspNetCore.Server;
 
 public class WebDavOptions
@@ -30,17 +28,16 @@ public class WebDavOptions
     public bool RequiresAuthentication { get; set; }
 
     /// <summary>
-    /// Gets or sets the streaming options for optimized file transfers.
-    /// Use StreamingOptions.ForNzbStreaming() for NZB/Usenet workloads.
+    /// Gets or sets whether to use fast (metadata-based) ETags for large files.
+    /// When enabled, ETags are computed from file size and modification time instead of content hash.
+    /// Default is true for better performance with large files.
     /// </summary>
-    public StreamingOptions? Streaming { get; set; }
+    public bool UseFastETag { get; set; } = true;
 
     /// <summary>
-    /// Applies streaming configuration if set.
-    /// Called automatically during startup.
+    /// Gets or sets the threshold in bytes above which fast ETags are used.
+    /// Files larger than this will use metadata-based ETags.
+    /// Default is 10MB. Set to 0 to always use fast ETags.
     /// </summary>
-    internal void ApplyStreamingOptions()
-    {
-        Streaming?.Apply();
-    }
+    public long FastETagThreshold { get; set; } = 10 * 1024 * 1024;
 }

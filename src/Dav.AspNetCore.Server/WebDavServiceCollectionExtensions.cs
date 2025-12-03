@@ -1,4 +1,5 @@
 using Dav.AspNetCore.Server.Locks;
+using Dav.AspNetCore.Server.Performance;
 using Dav.AspNetCore.Server.Store.Properties;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -23,8 +24,9 @@ public static class WebDavServiceCollectionExtensions
         var builder = new WebDavOptionsBuilder(services);
         webDavBuilder(builder);
 
-        // Apply streaming optimizations if configured
-        builder.ApplyStreamingOptions();
+        // Apply ETag configuration
+        ETagCache.AlwaysUseFastETag = builder.UseFastETag && builder.FastETagThreshold == 0;
+        ETagCache.FastETagThreshold = builder.FastETagThreshold;
 
         services.AddHttpContextAccessor();
 
